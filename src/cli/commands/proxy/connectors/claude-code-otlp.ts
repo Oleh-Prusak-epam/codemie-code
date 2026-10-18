@@ -334,7 +334,7 @@ export async function writeClaudeCodeOtlpConfig(
     const backupPathCandidate = settingsPath + SETTINGS_BACKUP_SUFFIX;
     const alreadyManaged = Object.values(existingHooksBlock).some(
       (entries) => Array.isArray(entries) && entries.some(groupContainsCodemieCommand)
-    ) || CODEMIE_ENV_KEYS.some((key) => key in existingEnv);
+    ) || CODEMIE_ENV_KEYS.some((key) => existingEnv[key] === codemieEnv[key]);
     if (alreadyManaged) {
       if (existsSync(backupPathCandidate)) {
         // Trustworthy pre-connect snapshot already captured; leave it alone.

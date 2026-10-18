@@ -281,6 +281,24 @@ describe('claude-code-otlp connector', () => {
         expect(backup.hooks.PreToolUse).toEqual([{ matcher: '', hooks: [{ type: 'command', command: 'echo mine' }] }]);
       });
 
+      it('CR-003: a foreign value under a managed env key name (via --force) is preserved verbatim in the backup, not stripped', async () => {
+        const settingsPath = join(homeDir, '.claude', 'settings.json');
+        await mkdir(join(homeDir, '.claude'), { recursive: true });
+
+        // Foreign, unrelated value that happens to reuse one of our managed
+        // env var names — requires --force since it conflicts with what this
+        // tool would write. No codemie hook group, no backup file yet.
+        const original = { env: { OTEL_LOGS_EXPORTER: 'jaeger' } };
+        await writeFile(settingsPath, JSON.stringify(original, null, 2));
+
+        const result = await writeClaudeCodeOtlpConfig({ force: true });
+
+        expect(result.backupPath).toBe(settingsPath + SETTINGS_BACKUP_SUFFIX);
+        // A value mismatch must NOT be treated as "already managed" — the
+        // foreign value is preserved via a raw copy, not stripped out.
+        expect(await readJson(result.backupPath!)).toEqual(original);
+      });
+
       it('CR-001: treats env-only management as already-managed, never raw-copying a live bearer token into the backup', async () => {
         const settingsPath = join(homeDir, '.claude', 'settings.json');
         await mkdir(join(homeDir, '.claude'), { recursive: true });
