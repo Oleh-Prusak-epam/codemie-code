@@ -77,11 +77,6 @@ async function disconnectClaudeCodeOtlp(scope?: 'user' | 'project'): Promise<voi
     }
 
     console.log(chalk.green(`✓ Claude Code OTLP disconnected (${result.path})`));
-    if (result.usedBackup) {
-      console.log(chalk.yellow(
-        "⚠ Restored the pre-connect backup because CodeMie's entries were the file's only content."
-      ));
-    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(chalk.red(`✗ Claude Code OTLP - ${message}`));
