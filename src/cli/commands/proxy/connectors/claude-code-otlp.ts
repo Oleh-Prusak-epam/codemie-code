@@ -45,7 +45,6 @@ interface RemoveClaudeCodeOtlpOptions {
 
 interface RemoveClaudeCodeOtlpResult {
   removed: boolean;
-  usedBackup: boolean;
   path: string | null;
   /** 'entry-removed': only this project's allowlist entry was dropped; 'full': all codemie wiring removed. */
   mode: 'entry-removed' | 'full' | 'noop';
@@ -435,7 +434,7 @@ export async function removeClaudeCodeOtlpConfig(
   const settingsPath = getClaudeSettingsPath();
 
   if (!existsSync(settingsPath)) {
-    return { removed: false, usedBackup: false, path: null, mode: 'noop', reason: 'no Claude Code settings file found' };
+    return { removed: false, path: null, mode: 'noop', reason: 'no Claude Code settings file found' };
   }
 
   const existing = await readSettingsFile(settingsPath);
@@ -451,7 +450,7 @@ export async function removeClaudeCodeOtlpConfig(
       } else {
         reason = 'all projects are tracked (no per-project entries)';
       }
-      return { removed: false, usedBackup: false, path: settingsPath, mode: 'noop', reason };
+      return { removed: false, path: settingsPath, mode: 'noop', reason };
     }
 
     const projectRoot = resolveProjectRoot();
@@ -459,7 +458,6 @@ export async function removeClaudeCodeOtlpConfig(
     if (remaining.length === allowlist.paths.length) {
       return {
         removed: false,
-        usedBackup: false,
         path: settingsPath,
         mode: 'noop',
         reason: `project ${await canonicalizePath(projectRoot)} is not in the allowlist`,
@@ -470,70 +468,36 @@ export async function removeClaudeCodeOtlpConfig(
       const env = { ...(existing.env ?? {}), [CODEMIE_ANALYTICS_PROJECT_FILTER_ENV]: JSON.stringify(remaining) };
       await writeAtomically(settingsPath, JSON.stringify({ ...existing, env }, null, 2) + '\n');
       logger.info('[proxy] Removed project from Claude Code analytics allowlist', ...sanitizeLogArgs({ settingsPath, remaining }));
-      return { removed: true, usedBackup: false, path: settingsPath, mode: 'entry-removed', allowlist: remaining };
+      return { removed: true, path: settingsPath, mode: 'entry-removed', allowlist: remaining };
     }
     // Last entry removed: fall through to the full removal below
   }
 
-  let removedHookCommands = false;
-  const hooks: Record<string, unknown> = {};
-  for (const [eventName, entries] of Object.entries(existing.hooks ?? {})) {
-    if (!Array.isArray(entries)) {
-      hooks[eventName] = entries;
-      continue;
-    }
-    if (entries.some(groupContainsCodemieCommand)) {
-      removedHookCommands = true;
-    }
-    const remainingGroups = stripCodemieCommandsFromGroups(entries);
-    if (remainingGroups.length > 0) {
-      hooks[eventName] = remainingGroups;
-    }
-  }
-
-  const env: Record<string, string> = { ...(existing.env ?? {}) };
-  let removedEnvKeys = false;
-  for (const key of [...CODEMIE_ENV_KEYS, CODEMIE_ANALYTICS_PROJECT_FILTER_ENV]) {
-    if (key in env) {
-      removedEnvKeys = true;
-      delete env[key];
-    }
-  }
+  const { stripped, removedHookCommands, removedEnvKeys } = stripCodemieManagedContent(existing);
 
   if (!removedHookCommands && !removedEnvKeys) {
-    return { removed: false, usedBackup: false, path: settingsPath, mode: 'noop', reason: 'no CodeMie entries found' };
+    return { removed: false, path: settingsPath, mode: 'noop', reason: 'no CodeMie entries found' };
   }
 
-  const stripped: ClaudeSettings = { ...existing };
-  if (Object.keys(hooks).length > 0) {
-    stripped.hooks = hooks;
-  } else {
-    delete stripped.hooks;
-  }
-  if (Object.keys(env).length > 0) {
-    stripped.env = env;
-  } else {
-    delete stripped.env;
-  }
-
-  const isEmpty = Object.keys(stripped).length === 0;
   const backupPath = settingsPath + SETTINGS_BACKUP_SUFFIX;
+  const isEmpty = Object.keys(stripped).length === 0;
 
+  // Always derive the result from the CURRENT live content (never restore raw
+  // backup bytes, however fresh): a backup can still hold a value the user
+  // changed or removed between the connect that captured it and this
+  // disconnect, and restoring it would resurrect exactly that value.
   if (isEmpty) {
-    if (existsSync(backupPath)) {
-      const backupContent = await readFile(backupPath, 'utf-8');
-      await writeAtomically(settingsPath, backupContent);
-      await unlink(backupPath);
-      logger.info('[proxy] Removed Claude Code analytics config (restored backup)', ...sanitizeLogArgs({ settingsPath }));
-      return { removed: true, usedBackup: true, path: settingsPath, mode: 'full' };
-    } else {
-      await unlink(settingsPath);
-      logger.info('[proxy] Removed Claude Code analytics config (deleted settings)', ...sanitizeLogArgs({ settingsPath }));
-      return { removed: true, usedBackup: false, path: settingsPath, mode: 'full' };
-    }
+    await unlink(settingsPath);
+  } else {
+    await writeAtomically(settingsPath, JSON.stringify(stripped, null, 2) + '\n');
+  }
+  if (existsSync(backupPath)) {
+    await unlink(backupPath);
   }
 
-  await writeAtomically(settingsPath, JSON.stringify(stripped, null, 2) + '\n');
-  logger.info('[proxy] Removed Claude Code analytics entries from settings', ...sanitizeLogArgs({ settingsPath }));
-  return { removed: true, usedBackup: false, path: settingsPath, mode: 'full' };
+  logger.info(
+    '[proxy] Removed Claude Code analytics entries from settings',
+    ...sanitizeLogArgs({ settingsPath, deleted: isEmpty })
+  );
+  return { removed: true, path: settingsPath, mode: 'full' };
 }

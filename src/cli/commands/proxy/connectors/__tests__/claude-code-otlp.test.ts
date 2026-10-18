@@ -621,14 +621,14 @@ describe('claude-code-otlp connector', () => {
       it('returns removed:false and touches nothing when no settings file exists', async () => {
         const result = await removeClaudeCodeOtlpConfig();
 
-        expect(result).toEqual({ mode: "noop", reason: "no Claude Code settings file found", removed: false, usedBackup: false, path: null });
+        expect(result).toEqual({ mode: "noop", reason: "no Claude Code settings file found", removed: false, path: null });
         expect(existsSync(join(homeDir, '.claude'))).toBe(false);
       });
 
       it('resolves the project root when scope is "project"', async () => {
         const result = await removeClaudeCodeOtlpConfig({ scope: 'project' });
 
-        expect(result).toEqual({ mode: "noop", reason: "no Claude Code settings file found", removed: false, usedBackup: false, path: null });
+        expect(result).toEqual({ mode: "noop", reason: "no Claude Code settings file found", removed: false, path: null });
       });
 
       it('does not require a live proxy daemon', async () => {
@@ -657,7 +657,7 @@ describe('claude-code-otlp connector', () => {
 
         const result = await removeClaudeCodeOtlpConfig();
 
-        expect(result).toEqual({ mode: "full", removed: true, usedBackup: false, path: settingsPath });
+        expect(result).toEqual({ mode: "full", removed: true, path: settingsPath });
         const final = await readJson(settingsPath);
         expect(final.theme).toBe('dark');
         expect(final.env).toEqual({ FOO: 'bar' });
@@ -678,13 +678,14 @@ describe('claude-code-otlp connector', () => {
         expect(final.hooks.PreToolUse).toBe('not-an-array');
       });
 
-      it('restores the backup and deletes it when stripping leaves the settings fully empty', async () => {
+      it('deletes the settings file without restoring backup content, and removes the backup, when stripping leaves settings fully empty', async () => {
         const settingsPath = join(homeDir, '.claude', 'settings.json');
         const backupPath = settingsPath + SETTINGS_BACKUP_SUFFIX;
         await mkdir(join(homeDir, '.claude'), { recursive: true });
 
-        const originalBackup = { theme: 'original-backup-value' };
-        await writeFile(backupPath, JSON.stringify(originalBackup, null, 2));
+        // A backup exists holding an OLD value the user has since removed — it
+        // must never come back, even though it's the only backup available.
+        await writeFile(backupPath, JSON.stringify({ env: { STEP: 'B' } }, null, 2));
 
         const codemieOnlyEnv = CODEMIE_ENV_KEYS.reduce<Record<string, string>>((acc, key) => {
           acc[key] = 'whatever';
@@ -704,8 +705,8 @@ describe('claude-code-otlp connector', () => {
 
         const result = await removeClaudeCodeOtlpConfig();
 
-        expect(result).toEqual({ mode: "full", removed: true, usedBackup: true, path: settingsPath });
-        expect(await readJson(settingsPath)).toEqual(originalBackup);
+        expect(result).toEqual({ mode: 'full', removed: true, path: settingsPath });
+        expect(existsSync(settingsPath)).toBe(false);
         expect(existsSync(backupPath)).toBe(false);
       });
 
@@ -731,7 +732,7 @@ describe('claude-code-otlp connector', () => {
 
         const result = await removeClaudeCodeOtlpConfig();
 
-        expect(result).toEqual({ mode: "full", removed: true, usedBackup: false, path: settingsPath });
+        expect(result).toEqual({ mode: "full", removed: true, path: settingsPath });
         expect(existsSync(settingsPath)).toBe(false);
       });
 
@@ -801,7 +802,7 @@ describe('claude-code-otlp connector', () => {
         ]);
       });
 
-      it('does NOT touch the backup when a mixed group leaves foreign content behind (settings not fully empty)', async () => {
+      it('removes the backup once disconnect succeeds, even when foreign content remains', async () => {
         const settingsPath = join(homeDir, '.claude', 'settings.json');
         const backupPath = settingsPath + SETTINGS_BACKUP_SUFFIX;
         await mkdir(join(homeDir, '.claude'), { recursive: true });
@@ -819,10 +820,32 @@ describe('claude-code-otlp connector', () => {
 
         const result = await removeClaudeCodeOtlpConfig();
 
-        // Settings still has foreign content (the user's command), so this is
-        // NOT treated as "fully empty" — the backup-restore branch must not fire.
-        expect(result.usedBackup).toBe(false);
-        expect(existsSync(backupPath)).toBe(true);
+        expect(result.removed).toBe(true);
+        expect(existsSync(backupPath)).toBe(false);
+      });
+    });
+
+    describe('regression: EPMCDME-15375 — never restore values the user changed/removed after connect', () => {
+      it('never restores a value the user removed after the latest connect', async () => {
+        const settingsPath = join(homeDir, '.claude', 'settings.json');
+        const backupPath = settingsPath + SETTINGS_BACKUP_SUFFIX;
+        await mkdir(join(homeDir, '.claude'), { recursive: true });
+
+        await writeFile(settingsPath, JSON.stringify({ env: { STEP: 'A' } }, null, 2));
+        await writeClaudeCodeOtlpConfig();                                               // connect #1
+        await removeClaudeCodeOtlpConfig();                                              // disconnect: leaves STEP:A, backup gone
+        await writeFile(settingsPath, JSON.stringify({ env: { STEP: 'B' } }, null, 2));   // manual edit
+        await writeClaudeCodeOtlpConfig();                                               // connect #2: backup now snapshots STEP:B
+
+        // User deletes STEP themselves, leaving only codemie's own keys.
+        const beforeFinalDisconnect = await readJson(settingsPath);
+        delete beforeFinalDisconnect.env.STEP;
+        await writeFile(settingsPath, JSON.stringify(beforeFinalDisconnect, null, 2));
+
+        await removeClaudeCodeOtlpConfig();                                              // final disconnect
+
+        expect(existsSync(settingsPath)).toBe(false); // nothing foreign remained -> deleted, not restored
+        expect(existsSync(backupPath)).toBe(false);
       });
     });
 
@@ -846,7 +869,7 @@ describe('claude-code-otlp connector', () => {
 
         const result = await removeClaudeCodeOtlpConfig();
 
-        expect(result).toEqual({ mode: "noop", reason: "no CodeMie entries found", removed: false, usedBackup: false, path: settingsPath });
+        expect(result).toEqual({ mode: "noop", reason: "no CodeMie entries found", removed: false, path: settingsPath });
         expect(await readRaw(settingsPath)).toBe(raw);
         expect(logger.info).not.toHaveBeenCalled();
       });
@@ -858,7 +881,7 @@ describe('claude-code-otlp connector', () => {
 
         const result = await removeClaudeCodeOtlpConfig();
 
-        expect(result).toEqual({ mode: "noop", reason: "no CodeMie entries found", removed: false, usedBackup: false, path: settingsPath });
+        expect(result).toEqual({ mode: "noop", reason: "no CodeMie entries found", removed: false, path: settingsPath });
         expect(await readRaw(settingsPath)).toBe('{}');
         expect(existsSync(backupPath)).toBe(true);
       });
@@ -874,7 +897,6 @@ describe('claude-code-otlp connector', () => {
           mode: 'noop',
           reason: `${CODEMIE_ANALYTICS_PROJECT_FILTER_ENV} is not set`,
           removed: false,
-          usedBackup: false,
           path: settingsPath,
         });
         expect(result.reason).toBe('CODEMIE_ANALYTICS_PROJECT_FILTER is not set');
@@ -887,7 +909,7 @@ describe('claude-code-otlp connector', () => {
 
         const result = await removeClaudeCodeOtlpConfig();
 
-        expect(result).toEqual({ mode: "full", removed: true, usedBackup: false, path: settingsPath });
+        expect(result).toEqual({ mode: "full", removed: true, path: settingsPath });
         const final = await readJson(settingsPath);
         expect(final.env).toEqual({ FOO: 'bar' });
         expect(final.theme).toBe('dark');
@@ -900,7 +922,7 @@ describe('claude-code-otlp connector', () => {
 
         const result = await removeClaudeCodeOtlpConfig();
 
-        expect(result).toEqual({ mode: "full", removed: true, usedBackup: false, path: settingsPath });
+        expect(result).toEqual({ mode: "full", removed: true, path: settingsPath });
         const final = await readJson(settingsPath);
         expect(final.hooks).toBeUndefined();
         expect(final.theme).toBe('dark');
