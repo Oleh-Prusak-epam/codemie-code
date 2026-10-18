@@ -199,6 +199,59 @@ function stripCodemieCommandsFromGroups(existingGroups: unknown[]): unknown[] {
   return result;
 }
 
+interface StripCodemieManagedContentResult {
+  stripped: ClaudeSettings;
+  removedHookCommands: boolean;
+  removedEnvKeys: boolean;
+}
+
+/**
+ * Returns `existing` with every codemie-owned hook command and env key
+ * removed, leaving only what the user owns. Used both to rebuild a missing
+ * backup without re-copying our own writes (including the OTLP bearer
+ * token), and to compute what disconnect should write back.
+ */
+function stripCodemieManagedContent(existing: ClaudeSettings): StripCodemieManagedContentResult {
+  let removedHookCommands = false;
+  const hooks: Record<string, unknown> = {};
+  for (const [eventName, entries] of Object.entries(existing.hooks ?? {})) {
+    if (!Array.isArray(entries)) {
+      hooks[eventName] = entries;
+      continue;
+    }
+    if (entries.some(groupContainsCodemieCommand)) {
+      removedHookCommands = true;
+    }
+    const remainingGroups = stripCodemieCommandsFromGroups(entries);
+    if (remainingGroups.length > 0) {
+      hooks[eventName] = remainingGroups;
+    }
+  }
+
+  const env: Record<string, string> = { ...(existing.env ?? {}) };
+  let removedEnvKeys = false;
+  for (const key of [...CODEMIE_ENV_KEYS, CODEMIE_ANALYTICS_PROJECT_FILTER_ENV]) {
+    if (key in env) {
+      removedEnvKeys = true;
+      delete env[key];
+    }
+  }
+
+  const stripped: ClaudeSettings = { ...existing };
+  if (Object.keys(hooks).length > 0) {
+    stripped.hooks = hooks;
+  } else {
+    delete stripped.hooks;
+  }
+  if (Object.keys(env).length > 0) {
+    stripped.env = env;
+  } else {
+    delete stripped.env;
+  }
+
+  return { stripped, removedHookCommands, removedEnvKeys };
+}
+
 export async function writeClaudeCodeOtlpConfig(
   opts: WriteClaudeCodeOtlpOptions = {}
 ): Promise<WriteClaudeCodeOtlpResult> {
@@ -275,18 +328,34 @@ export async function writeClaudeCodeOtlpConfig(
     allowlist = await addProjectPath(current, resolveProjectRoot());
   }
 
-  // --- Backup on first modification (no existing codemie entry, no existing backup) ---
+  // --- Backup, keyed on whether CodeMie already owns part of the file (not on
+  // whether a backup file happens to exist) ---
   let backupPath: string | null = null;
   if (existsSync(settingsPath)) {
     const backupPathCandidate = settingsPath + SETTINGS_BACKUP_SUFFIX;
-    const backupCandidateExists = existsSync(backupPathCandidate);
     const alreadyManaged = Object.values(existingHooksBlock).some(
       (entries) => Array.isArray(entries) && entries.some(groupContainsCodemieCommand)
     );
-    if (!alreadyManaged && !backupCandidateExists) {
+    if (alreadyManaged) {
+      if (existsSync(backupPathCandidate)) {
+        // Trustworthy pre-connect snapshot already captured; leave it alone.
+        backupPath = backupPathCandidate;
+      } else {
+        // Managed but the backup is gone. Copying the file as-is would
+        // enshrine our own writes (including the OTLP bearer token) as the
+        // "pre-connect original" — rebuild it by stripping our own content
+        // instead. Nothing to protect (and no backup needed) if that leaves
+        // zero foreign keys — e.g. a fresh install that only ever held our
+        // own entries.
+        const { stripped } = stripCodemieManagedContent(existing);
+        if (Object.keys(stripped).length > 0) {
+          await writeAtomically(backupPathCandidate, JSON.stringify(stripped, null, 2) + '\n');
+          backupPath = backupPathCandidate;
+        }
+      }
+    } else {
+      // Not yet managed: always (re)snapshot, overwriting any stale previous backup.
       await copyFile(settingsPath, backupPathCandidate);
-      backupPath = backupPathCandidate;
-    } else if (backupCandidateExists) {
       backupPath = backupPathCandidate;
     }
   }

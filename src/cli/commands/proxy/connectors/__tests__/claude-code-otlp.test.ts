@@ -254,6 +254,48 @@ describe('claude-code-otlp connector', () => {
         }
       });
 
+      it('rebuilds a missing backup from stripped content (not a raw copy) when settings are already managed', async () => {
+        const settingsPath = join(homeDir, '.claude', 'settings.json');
+        await mkdir(join(homeDir, '.claude'), { recursive: true });
+
+        // Already managed (has our hook group + our env keys) AND has foreign content,
+        // but no backup file exists yet.
+        await writeFile(
+          settingsPath,
+          JSON.stringify(
+            {
+              theme: 'dark',
+              env: { FOO: 'bar', OTEL_LOGS_EXPORTER: 'otlp' },
+              hooks: { PreToolUse: [codemieHookGroup(), { matcher: '', hooks: [{ type: 'command', command: 'echo mine' }] }] },
+            },
+            null, 2
+          )
+        );
+
+        const result = await writeClaudeCodeOtlpConfig();
+
+        expect(result.backupPath).toBe(settingsPath + SETTINGS_BACKUP_SUFFIX);
+        const backup = await readJson(result.backupPath!);
+        expect(backup.theme).toBe('dark');
+        expect(backup.env).toEqual({ FOO: 'bar' }); // codemie env keys stripped, not copied
+        expect(backup.hooks.PreToolUse).toEqual([{ matcher: '', hooks: [{ type: 'command', command: 'echo mine' }] }]);
+      });
+
+      it('refreshes the backup to reflect the latest pre-connect state on reconnect after a disconnect and manual edit', async () => {
+        const settingsPath = join(homeDir, '.claude', 'settings.json');
+        await mkdir(join(homeDir, '.claude'), { recursive: true });
+        await writeFile(settingsPath, JSON.stringify({ env: { STEP: 'A' } }, null, 2));
+
+        await writeClaudeCodeOtlpConfig();     // connect #1: backup snapshots STEP: A
+        await removeClaudeCodeOtlpConfig();    // disconnect: leaves { env: { STEP: 'A' } }, backup removed
+        await writeFile(settingsPath, JSON.stringify({ env: { STEP: 'B' } }, null, 2)); // manual edit
+
+        const result = await writeClaudeCodeOtlpConfig(); // connect #2
+
+        expect(result.backupPath).toBe(settingsPath + SETTINGS_BACKUP_SUFFIX);
+        expect(await readJson(result.backupPath!)).toEqual({ env: { STEP: 'B' } });
+      });
+
       it('overwrites a single conflicting env value when force is true', async () => {
         const settingsPath = join(homeDir, '.claude', 'settings.json');
         await mkdir(join(homeDir, '.claude'), { recursive: true });
