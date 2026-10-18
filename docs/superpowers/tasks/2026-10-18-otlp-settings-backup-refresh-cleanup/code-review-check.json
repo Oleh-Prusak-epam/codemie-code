@@ -1,0 +1,39 @@
+{
+  "decision": "request-changes",
+  "rationale": "CR-001 is resolved: alreadyManaged now also considers CODEMIE_ENV_KEYS presence, with a regression test (verified GREEN) proving the live bearer token is stripped out of a rebuilt backup for an env-only-managed file. CR-002 is resolved via explicit human decision: the user confirmed it is intentional (mirrors the already-accepted codex-desktop precedent; AC3's no-restore redesign makes it functionally safe), so no code change was made or required. However, a narrow two-lens confirmation pass on the fix-up diff alone (dispatched because the `key in existingEnv` presence-only check looked suspicious) surfaced and CONFIRMED a new issue (CR-003): the check only tests key presence, not value match, so under `--force` a settings file with a genuinely foreign, unrelated value under one of the 9 CODEMIE_ENV_KEYS names is misclassified as codemie-managed. If the backup is also missing, stripCodemieManagedContent unconditionally deletes any CODEMIE_ENV_KEYS key before writing the backup, silently and permanently dropping that foreign value (no other copy exists; the live file is about to be overwritten with codemie's own value too). A stray TypeError concern from the blind lens on `key in existingEnv` was checked directly against the source (`existingEnv = existing.env ?? {}`, line 281) and ruled out as a false positive — existingEnv is always an object.",
+  "confidence": "low",
+  "risk_flags": ["security"],
+  "business_review": [
+    {"kind": "spec", "item": "AC1: Backup is refreshed (or recreated) on each connect that modifies the file", "status": "partial", "notes": "Refreshed on the not-yet-managed -> managed transition and when an already-managed file's backup is missing (rebuilt from stripped content). Once a backup exists for an already-managed file, later connects that further modify the file (e.g. allowlist/env changes) do not refresh it — see CR-002 (accepted as intentional by the user)."},
+    {"kind": "spec", "item": "AC2: After a successful disconnect the backup file is removed", "status": "pass", "notes": "removeClaudeCodeOtlpConfig now unconditionally unlinks an existing backup after any successful full removal, not just the previously-empty-only case."},
+    {"kind": "spec", "item": "AC3: Disconnect never restores values changed/removed by the user after connect", "status": "pass", "notes": "The isEmpty branch's raw backup-restore-and-write was removed entirely; disconnect only ever writes the live-derived `stripped` result or deletes the file."},
+    {"kind": "spec", "item": "AC4 (plan's clarification assumption): disconnect must derive the result from the current live settings file via surgical strip, deleting the file when nothing foreign remains, instead of restoring the backup", "status": "pass", "notes": "Implemented via the shared stripCodemieManagedContent helper; usedBackup field and its CLI warning were removed, confirming no restore path remains."}
+  ],
+  "standards_review": [
+    {"standard": "git-workflow.md commit format", "status": "pass", "notes": "Fix-up commit uses Conventional Commits with allowed type (fix) and allowed 'proxy' scope."},
+    {"standard": "code-quality.md (ES modules, explicit types, no any)", "status": "pass", "notes": "One-line boolean-OR change; no new type surface, no `any` introduced."}
+  ],
+  "finding_status": [
+    {
+      "id": "CR-001",
+      "status": "resolved",
+      "notes": "Fixed in src/cli/commands/proxy/connectors/claude-code-otlp.ts:335-337 (alreadyManaged now also true when any CODEMIE_ENV_KEYS key is present in existingEnv). New regression test 'CR-001: treats env-only management as already-managed, never raw-copying a live bearer token into the backup' added and verified passing (52/52 tests green, tsc clean)."
+    },
+    {
+      "id": "CR-002",
+      "status": "resolved",
+      "notes": "User explicitly decided to accept this as intentional design (matches the already-accepted codex-desktop precedent; functionally safe because AC3 means backup content is never read back on disconnect). No code change made or required."
+    }
+  ],
+  "findings": [
+    {
+      "id": "CR-003",
+      "triage": "patch",
+      "severity": "major",
+      "title": "CR-001's fix-up can itself cause silent data loss of a genuinely foreign env value under --force",
+      "location": "src/cli/commands/proxy/connectors/claude-code-otlp.ts:335-337 (new alreadyManaged check) interacting with stripCodemieManagedContent (~lines 201-242, invoked at line 349)",
+      "evidence": "The new check `CODEMIE_ENV_KEYS.some((key) => key in existingEnv)` tests key presence only, not value equality. Reachable only via `--force` (the earlier conflict-detection block already throws on a mismatched value without it): if a settings file has a genuinely foreign, pre-existing value under one of the 9 CODEMIE_ENV_KEYS names and the user reconnects with --force, alreadyManaged becomes true purely from the key's name. If the backup is also missing, the rebuild branch calls stripCodemieManagedContent, which unconditionally deletes every CODEMIE_ENV_KEYS key from the content it backs up — including the user's foreign value, which is about to be overwritten in the live file too. The backup that was supposed to let the user recover their own setting no longer contains it; it is permanently lost. Confirmed independently by a blind lens and an edge-case lens dispatched specifically to check this suspicion against the fix-up diff.",
+      "recommendation": "Make the env-presence check value-aware, matching CR-001's own prior recommendation: `CODEMIE_ENV_KEYS.some((key) => existingEnv[key] === codemieEnv[key])`. A key present with codemie's own exact value is a strong signal of prior management (safe to treat as already-managed); a key present with any other value is foreign content and should fall through to the not-yet-managed branch, which does a raw copyFile that preserves it. This also keeps CR-001's original fix intact, since the bearer-token scenario in the regression test uses a value that matches the current session's desired value."
+    }
+  ]
+}
