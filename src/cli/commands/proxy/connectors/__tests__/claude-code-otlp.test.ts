@@ -281,6 +281,32 @@ describe('claude-code-otlp connector', () => {
         expect(backup.hooks.PreToolUse).toEqual([{ matcher: '', hooks: [{ type: 'command', command: 'echo mine' }] }]);
       });
 
+      it('CR-001: treats env-only management as already-managed, never raw-copying a live bearer token into the backup', async () => {
+        const settingsPath = join(homeDir, '.claude', 'settings.json');
+        await mkdir(join(homeDir, '.claude'), { recursive: true });
+
+        // Codemie's own env keys (including the live bearer token, matching
+        // the current proxy session so it is not flagged as a conflict) are
+        // present, but the hook group was stripped by some other process — no
+        // codemie hook command anywhere. No backup exists yet.
+        await writeFile(
+          settingsPath,
+          JSON.stringify(
+            {
+              theme: 'dark',
+              env: { FOO: 'bar', OTEL_EXPORTER_OTLP_HEADERS: `Authorization=Bearer ${mockState.gatewayKey}` },
+            },
+            null, 2
+          )
+        );
+
+        const result = await writeClaudeCodeOtlpConfig();
+
+        expect(result.backupPath).toBe(settingsPath + SETTINGS_BACKUP_SUFFIX);
+        const backup = await readJson(result.backupPath!);
+        expect(backup).toEqual({ theme: 'dark', env: { FOO: 'bar' } });
+      });
+
       it('refreshes the backup to reflect the latest pre-connect state on reconnect after a disconnect and manual edit', async () => {
         const settingsPath = join(homeDir, '.claude', 'settings.json');
         await mkdir(join(homeDir, '.claude'), { recursive: true });
