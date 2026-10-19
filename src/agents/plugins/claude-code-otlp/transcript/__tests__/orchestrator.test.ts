@@ -792,6 +792,24 @@ describe('openSubagentPass — request identity', () => {
     expect(usage[0]).toMatchObject({ agent_type: '', scope_kind: 'agent', scope_name: '' });
   });
 
+  it('scopes a forked skill (SubagentFile.skillName set) as scope_kind=skill/scope_name=<skillName>, never scope_kind=agent (EPMCDME-15968)', async () => {
+
+    const sessionId = 'session-sub-forked-skill';
+    const file = writeSubagentFixture(sessionId, 'a1', [
+      usageLine({ uuid: 'u1', messageId: 'msg_a', outputTokens: 10 }),
+    ]);
+
+    const events = await subagentEvents(sessionId, { ...file, agentType: 'general-purpose', skillName: 'code-review' });
+    const usage = events.filter((e) => e.type === 'agent.usage.request');
+    const subagentUsage = events.find((e) => e.type === 'agent.subagent.usage');
+
+    // agent_type is kept as-is (still informative) — only scope_kind/scope_name change.
+    expect(usage[0]).toMatchObject({ agent_type: 'general-purpose', scope_kind: 'skill', scope_name: 'code-review' });
+    expect(subagentUsage?.usage).toEqual([
+      expect.objectContaining({ scope_kind: 'skill', scope_name: 'code-review' }),
+    ]);
+  });
+
   it('carries agentType onto agent.subagent.usage\'s usage[] rows as scope_name, matching the contract\'s (model, speed, inference_geo, service_tier, scope_kind, scope_name) grouping key (EPMCDME-15783)', async () => {
 
     const sessionId = 'session-sub-usage-scope-name';

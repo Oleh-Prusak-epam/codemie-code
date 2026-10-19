@@ -604,10 +604,15 @@ async function deriveSubagentEvents(
 
   const touchedKeys = new Set<string>();
   const agentType = subagentFile.agentType ?? '';
+  // A forked skill (EPMCDME-15968: a slash-command skill run as a background subagent) scopes
+  // its usage as `scope_kind: 'skill'` / `scope_name: <skillName>`, same as the main transcript's
+  // `deriveMainEvents` does for an inline skill (`state.activeSkill`) — a regular subagent keeps
+  // `scope_kind: 'agent'` / `scope_name: <agentType>`. `agentId` is kept either way, so the
+  // backend's per-agent cost join is unaffected.
+  const scopeKind = subagentFile.skillName ? 'skill' : 'agent';
+  const scopeName = subagentFile.skillName ?? agentType;
   for (const line of lines) {
-    // Contract: for `scope_kind: 'agent'`, `scope_name` carries the agent type (never `''` unless
-    // the type itself is unresolved) — same source as the `agent_type` field below.
-    const parsed = parseUsageLine(line, 'agent', agentType, subagentFile.agentId, agentType);
+    const parsed = parseUsageLine(line, scopeKind, scopeName, subagentFile.agentId, agentType);
     if (parsed) {
       const key = usageRequestKey(parsed);
       const existing = state.openRequests[key];
@@ -622,11 +627,12 @@ async function deriveSubagentEvents(
     events.push(buildUsageRequestEvent(sessionId, state.openRequests[key]));
   }
 
-  // Cumulative usage for this agent — every scope_kind:'agent' record known for it so far,
-  // not just the ones touched this pass (consistent with buildFullAccumulator's own
-  // "recomputed from full state" framing for the sibling agent.session.summary event).
+  // Cumulative usage for this agent — every record of its own scope_kind ('skill' for a forked
+  // skill, 'agent' otherwise) known for it so far, not just the ones touched this pass
+  // (consistent with buildFullAccumulator's own "recomputed from full state" framing for the
+  // sibling agent.session.summary event).
   const usageRequestsForAgent = Object.values(state.openRequests).filter(
-    (r) => r.scopeKind === 'agent' && r.agentId === subagentFile.agentId
+    (r) => r.scopeKind === scopeKind && r.agentId === subagentFile.agentId
   );
 
   const scan = await scanSubagentTranscript(subagentFile.filePath);

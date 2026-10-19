@@ -23,6 +23,8 @@ const openMainTranscriptPassMock = vi.fn();
 const openSubagentPassMock = vi.fn();
 const openSessionEndPassMock = vi.fn();
 const readSubagentMetaMock = vi.fn();
+const readForkedSkillMarkerMock = vi.fn();
+const subagentFilePathMock = vi.fn((transcriptPath: string, agentId: string) => `${transcriptPath}:${agentId}`);
 
 vi.mock('../client-version-cache.js', () => ({
   resolveClientVersion: resolveClientVersionMock,
@@ -36,6 +38,8 @@ vi.mock('../transcript/orchestrator.js', () => ({
 
 vi.mock('../transcript/subagent-usage.js', () => ({
   readSubagentMeta: readSubagentMetaMock,
+  readForkedSkillMarker: readForkedSkillMarkerMock,
+  subagentFilePath: subagentFilePathMock,
 }));
 
 import { isProjectTracked } from '../claude-code-otlp.allowlist.js';
@@ -118,6 +122,7 @@ describe('ClaudeCodeOtlpPlugin hook-time enrichment', () => {
     openSubagentPassMock.mockResolvedValue(emptyPass());
     openSessionEndPassMock.mockResolvedValue(emptyPass());
     readSubagentMetaMock.mockResolvedValue({});
+    readForkedSkillMarkerMock.mockResolvedValue({});
   });
 
   afterEach(() => {
@@ -189,6 +194,9 @@ describe('ClaudeCodeOtlpPlugin.processOtlpEvent dispatch', () => {
     openSessionEndPassMock.mockResolvedValue(emptyPass());
     readSubagentMetaMock.mockReset();
     readSubagentMetaMock.mockResolvedValue({});
+    readForkedSkillMarkerMock.mockReset();
+    readForkedSkillMarkerMock.mockResolvedValue({});
+    subagentFilePathMock.mockClear();
     resolveClientVersionMock.mockReset();
     resolveClientVersionMock.mockResolvedValue('2.1.23');
     forwardOtlpEventsToSpool.mockReset();
@@ -356,8 +364,9 @@ describe('ClaudeCodeOtlpPlugin.processOtlpEvent dispatch', () => {
     expect(forwardOtlpEventsToSpool).not.toHaveBeenCalled();
   });
 
-  it('forwards skill_name on SubagentStop when the meta sidecar names a forked skill', async () => {
-    readSubagentMetaMock.mockResolvedValue({ spawnDepth: 1, description: '/code-review', name: 'code-review' });
+  it('forwards skill_name on SubagentStop when the forked-skill marker sidecar names a skill', async () => {
+    readSubagentMetaMock.mockResolvedValue({ spawnDepth: 1, description: '/code-review' });
+    readForkedSkillMarkerMock.mockResolvedValue({ skillName: 'code-review' });
     const plugin = new ClaudeCodeOtlpPlugin();
     const rawEvent = JSON.stringify(
       hookEvent({
@@ -388,13 +397,30 @@ describe('ClaudeCodeOtlpPlugin.processOtlpEvent dispatch', () => {
     expect(forwardedEvents()[0]).not.toHaveProperty('skill_name');
   });
 
-  it('forwards skill_name on SubagentStart when the meta sidecar names a forked skill', async () => {
-    readSubagentMetaMock.mockResolvedValue({ spawnDepth: 1, description: '/code-review', name: 'code-review' });
+  it('does not add skill_name on SubagentStop for a regular agent started with its own `name` (EPMCDME-15968 regression: `name` is the Agent tool\'s addressing field, not a skill marker)', async () => {
+    readSubagentMetaMock.mockResolvedValue({ spawnDepth: 1, description: 'repo scout' });
+    readForkedSkillMarkerMock.mockResolvedValue({}); // no forked-skill marker — this is a regular named agent
+    const plugin = new ClaudeCodeOtlpPlugin();
+    const rawEvent = JSON.stringify(
+      hookEvent({
+        hook_event_name: 'SubagentStop',
+        agent_transcript_path: '/tmp/agent-sub-named.jsonl',
+        agent_type: 'Explore',
+      })
+    );
+
+    await plugin.processOtlpEvent(rawEvent, { ensureOtlpProxy, forwardOtlpEventsToSpool });
+
+    expect(forwardedEvents()[0]).not.toHaveProperty('skill_name');
+  });
+
+  it('forwards skill_name on SubagentStart when the forked-skill marker sidecar names a skill', async () => {
+    readForkedSkillMarkerMock.mockResolvedValue({ skillName: 'code-review' });
     const plugin = new ClaudeCodeOtlpPlugin();
     const rawEvent = JSON.stringify(
       hookEvent({
         hook_event_name: 'SubagentStart',
-        agent_transcript_path: '/tmp/agent-sub-6.jsonl',
+        agent_id: 'sub-6',
         agent_type: 'general-purpose',
       })
     );
@@ -402,6 +428,23 @@ describe('ClaudeCodeOtlpPlugin.processOtlpEvent dispatch', () => {
     await plugin.processOtlpEvent(rawEvent, { ensureOtlpProxy, forwardOtlpEventsToSpool });
 
     expect(forwardedEvents()[0]).toMatchObject({ skill_name: 'code-review' });
+  });
+
+  it('does not add skill_name on SubagentStart for a regular agent (no forked-skill marker)', async () => {
+    readForkedSkillMarkerMock.mockResolvedValue({});
+    const plugin = new ClaudeCodeOtlpPlugin();
+    const rawEvent = JSON.stringify(
+      hookEvent({
+        hook_event_name: 'SubagentStart',
+        agent_id: 'sub-named',
+        agent_type: 'Explore',
+      })
+    );
+
+    await plugin.processOtlpEvent(rawEvent, { ensureOtlpProxy, forwardOtlpEventsToSpool });
+
+    expect(forwardedEvents()[0]).not.toHaveProperty('skill_name');
+    expect(subagentFilePathMock).toHaveBeenCalledWith('/tmp/transcript.jsonl', 'sub-named');
   });
 
   it('forwards every event a pass returns (the raw event plus any derived events) as one batch, in order', async () => {
@@ -448,6 +491,8 @@ describe('ClaudeCodeOtlpPlugin wire type', () => {
     openMainTranscriptPassMock.mockResolvedValue(emptyPass());
     openSubagentPassMock.mockResolvedValue(emptyPass());
     openSessionEndPassMock.mockResolvedValue(emptyPass());
+    readSubagentMetaMock.mockResolvedValue({});
+    readForkedSkillMarkerMock.mockResolvedValue({});
   });
 
   const typeFor = async (name: string): Promise<unknown> => {

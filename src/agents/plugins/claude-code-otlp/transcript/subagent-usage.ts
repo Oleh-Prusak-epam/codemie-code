@@ -31,6 +31,12 @@ export interface SubagentFile {
   description?: string;
   /** The triggering hook's `cwd` — the contract's `worktree` path. `''` when the caller has none. */
   cwd?: string;
+  /** The forked skill's name, when this subagent is actually a slash-command-invoked skill run
+   *  in the background (EPMCDME-15968) — absent for a regular agent dispatch. Sourced from the
+   *  `<agent>.forked-skill.marker.json` sidecar, never from `.meta.json`'s `name` (see
+   *  {@link readForkedSkillMarker}: that field is the Agent tool's optional addressing name,
+   *  which any named agent can carry, forked skill or not). */
+  skillName?: string;
 }
 
 interface SubagentMeta {
@@ -38,9 +44,6 @@ interface SubagentMeta {
   agentType?: string;
   spawnDepth?: number;
   description?: string;
-  /** The forked skill's name, when this subagent is actually a slash-command-invoked skill run
-   *  in the background (EPMCDME-15968) — absent for a regular agent dispatch. */
-  name?: string;
 }
 
 /**
@@ -56,7 +59,6 @@ export async function readSubagentMeta(jsonlFilePath: string): Promise<SubagentM
     if (typeof metaRaw.agentType === 'string') meta.agentType = metaRaw.agentType;
     if (typeof metaRaw.spawnDepth === 'number') meta.spawnDepth = metaRaw.spawnDepth;
     if (typeof metaRaw.description === 'string') meta.description = metaRaw.description;
-    if (typeof metaRaw.name === 'string') meta.name = metaRaw.name;
   } catch {
     // sidecar absent or malformed — proceed without it.
   }
@@ -64,21 +66,63 @@ export async function readSubagentMeta(jsonlFilePath: string): Promise<SubagentM
 }
 
 /**
+ * Read one subagent's `.forked-skill.marker.json` sidecar (same path, `.jsonl` swapped) — the
+ * signal Claude Code itself writes only for a slash-command skill forked as a background
+ * subagent (`{"forkedSkill": true, "skillName": "<name>"}`), never for a regular named agent
+ * dispatch (which only ever gets a `.meta.json` with its own `name`, a different, unrelated
+ * field — see {@link SubagentMeta}'s removed `name`). Never throws: a missing or malformed
+ * sidecar (the common case — most subagents are not forked skills) resolves to `{}`.
+ */
+export async function readForkedSkillMarker(jsonlFilePath: string): Promise<{ skillName?: string }> {
+  try {
+    const markerPath = jsonlFilePath.replace(/\.jsonl$/, '.forked-skill.marker.json');
+    const markerRaw = JSON.parse(await readFile(markerPath, 'utf-8')) as Record<string, unknown>;
+    if (markerRaw.forkedSkill === true && typeof markerRaw.skillName === 'string') {
+      return { skillName: markerRaw.skillName };
+    }
+  } catch {
+    // sidecar absent or malformed — this subagent is not a forked skill (or we can't tell).
+  }
+  return {};
+}
+
+/**
+ * The directory Claude Code writes a main transcript's subagent files under:
+ * `<parentDir>/<sessionId>/subagents/`, where `sessionId` is `mainTranscriptPath`'s own
+ * basename minus `.jsonl`. Shared by {@link findSubagentFiles} (lists every file there) and
+ * {@link subagentFilePath} (builds one specific agent's path from a `SubagentStart` hook, which
+ * — unlike `SubagentStop` — carries no `agent_transcript_path` of its own).
+ */
+function subagentsDirFor(mainTranscriptPath: string): string {
+  const parentDir = dirname(mainTranscriptPath);
+  const sessionId = basename(mainTranscriptPath).replace(/\.jsonl$/, '');
+  return join(parentDir, sessionId, 'subagents');
+}
+
+/**
+ * The transcript path a `SubagentStart` hook's own subagent would be written to, built from the
+ * triggering hook's `transcript_path` (the *main* transcript — `SubagentStart`'s payload has no
+ * `agent_transcript_path` field, unlike `SubagentStop`'s) and its `agent_id`. Same convention
+ * {@link findSubagentFiles} discovers files with. The file may not exist yet if called too
+ * early; callers read it the same tolerant way as any other subagent sidecar.
+ */
+export function subagentFilePath(mainTranscriptPath: string, agentId: string): string {
+  return join(subagentsDirFor(mainTranscriptPath), `agent-${agentId}.jsonl`);
+}
+
+/**
  * Discover subagent transcript files for a main transcript at `mainTranscriptPath`.
  *
  * Looks under `<parentDir>/<sessionId>/subagents/` (where `sessionId` is `mainTranscriptPath`'s
- * own basename, minus `.jsonl`) for `agent-*.jsonl` files, reading each one's sidecar via
- * {@link readSubagentMeta}.
+ * own basename, minus `.jsonl`) for `agent-*.jsonl` files, reading each one's `.meta.json` via
+ * {@link readSubagentMeta} and its `.forked-skill.marker.json` via {@link readForkedSkillMarker}.
  *
  * Never throws: a missing subagents directory, an unreadable directory, or any other failure all
  * resolve to `[]`.
  */
 export async function findSubagentFiles(mainTranscriptPath: string): Promise<SubagentFile[]> {
   try {
-    const parentDir = dirname(mainTranscriptPath);
-    const filename = basename(mainTranscriptPath);
-    const sessionId = filename.replace(/\.jsonl$/, '');
-    const subagentsDir = join(parentDir, sessionId, 'subagents');
+    const subagentsDir = subagentsDirFor(mainTranscriptPath);
 
     const files = await readdir(subagentsDir);
     const agentFiles = await Promise.all(
@@ -87,8 +131,8 @@ export async function findSubagentFiles(mainTranscriptPath: string): Promise<Sub
         .map(async (f): Promise<SubagentFile> => {
           const agentId = f.replace(/^agent-/, '').replace(/\.jsonl$/, '');
           const filePath = join(subagentsDir, f);
-          const meta = await readSubagentMeta(filePath);
-          return { agentId, filePath, ...meta };
+          const [meta, marker] = await Promise.all([readSubagentMeta(filePath), readForkedSkillMarker(filePath)]);
+          return { agentId, filePath, ...meta, ...marker };
         })
     );
 
