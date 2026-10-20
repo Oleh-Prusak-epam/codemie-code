@@ -20,6 +20,7 @@
 
 import { readdir, readFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
+import { isPathWithinDirectory } from '@/utils/paths.js';
 import type { OpenUsageRequest } from './parse-state.js';
 
 export interface SubagentFile {
@@ -105,9 +106,21 @@ function subagentsDirFor(mainTranscriptPath: string): string {
  * `agent_transcript_path` field, unlike `SubagentStop`'s) and its `agent_id`. Same convention
  * {@link findSubagentFiles} discovers files with. The file may not exist yet if called too
  * early; callers read it the same tolerant way as any other subagent sidecar.
+ *
+ * `agentId` comes straight from the hook payload (CR-002): confine the result to the subagents
+ * directory (`isPathWithinDirectory`, same containment check `.ai-run/guides/security/
+ * security-practices.md` documents) so a crafted `agent_id` can never make the caller read a
+ * marker sidecar from outside it. Never throws — an out-of-bounds `agentId` resolves to a path
+ * guaranteed not to exist inside the subagents directory, the same "degrade, don't throw"
+ * contract every other sidecar reader in this module keeps.
  */
 export function subagentFilePath(mainTranscriptPath: string, agentId: string): string {
-  return join(subagentsDirFor(mainTranscriptPath), `agent-${agentId}.jsonl`);
+  const subagentsDir = subagentsDirFor(mainTranscriptPath);
+  const candidate = join(subagentsDir, `agent-${agentId}.jsonl`);
+  if (!isPathWithinDirectory(subagentsDir, candidate)) {
+    return join(subagentsDir, 'agent-invalid.jsonl');
+  }
+  return candidate;
 }
 
 /**

@@ -29,6 +29,7 @@ import {
 } from '../subagent-usage.js';
 import { parseUsageLine, buildUsageRequestEvent } from '../usage-request.js';
 import type { OpenUsageRequest } from '../parse-state.js';
+import { isPathWithinDirectory } from '@/utils/paths.js';
 
 let tmpDir: string | undefined;
 
@@ -245,6 +246,15 @@ describe('subagentFilePath', () => {
     const path = subagentFilePath(mainTranscriptPath, 'a123');
 
     expect(path).toBe(join('proj-dir', 'session-1', 'subagents', 'agent-a123.jsonl'));
+  });
+
+  it('never resolves outside the subagents directory for a crafted agentId (CR-002 regression)', () => {
+    const mainTranscriptPath = join('proj-dir', 'session-1.jsonl');
+    const subagentsDir = join('proj-dir', 'session-1', 'subagents');
+
+    const path = subagentFilePath(mainTranscriptPath, '../../../etc/passwd');
+
+    expect(isPathWithinDirectory(subagentsDir, path)).toBe(true);
   });
 });
 

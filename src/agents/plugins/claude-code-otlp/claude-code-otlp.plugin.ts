@@ -150,8 +150,13 @@ export class ClaudeCodeOtlpPlugin extends OtlpAgentAdapter<HookInput, UserPrompt
       readSubagentMeta(agentTranscriptPath),
       readForkedSkillMarker(agentTranscriptPath),
     ]);
+    // Never let agentId resolve to '' (CR-001): deriveMainEvents' api_calls filter treats an
+    // empty agentId as main-thread, so a forked skill's subagent ending up with one here would
+    // double-count its usage right back into api_calls. agentTranscriptPath is already confirmed
+    // non-empty above, so it is always a safe final fallback.
+    const derivedAgentId = basename(agentTranscriptPath).replace(/^agent-/, '').replace(/\.jsonl$/, '');
     const subagentFile: SubagentFile = {
-      agentId: hookInput.agent_id || basename(agentTranscriptPath).replace(/^agent-/, '').replace(/\.jsonl$/, ''),
+      agentId: hookInput.agent_id || derivedAgentId || agentTranscriptPath,
       filePath: agentTranscriptPath,
       // `tool_use_id` is not declared on the SDK's SubagentStopHookInput type; the hook payload
       // wins when it carries it anyway, else fall back to the `.meta.json` sidecar.

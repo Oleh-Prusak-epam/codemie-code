@@ -313,6 +313,26 @@ describe('ClaudeCodeOtlpPlugin.processOtlpEvent dispatch', () => {
     expect(openSubagentPassMock).toHaveBeenCalledWith('sid-1', expect.objectContaining({ agentId: 'sub-2' }));
   });
 
+  it('never derives an empty agentId, even from a degenerate transcript path with no agent_id (CR-001 regression)', async () => {
+    // Both agent_id and the basename-stripped id are empty here — agentId must still fall back
+    // to something non-empty (the full transcript path), never ''. An empty agentId would be
+    // treated as main-thread by deriveMainEvents' api_calls filter, double-counting this
+    // subagent's usage right back into the main session's count (EPMCDME-15968).
+    const plugin = new ClaudeCodeOtlpPlugin();
+    const rawEvent = JSON.stringify(
+      hookEvent({
+        hook_event_name: 'SubagentStop',
+        agent_transcript_path: '/tmp/subagents/agent-.jsonl',
+        agent_type: 'explore',
+      })
+    );
+
+    await plugin.processOtlpEvent(rawEvent, { ensureOtlpProxy, forwardOtlpEventsToSpool });
+
+    const call = openSubagentPassMock.mock.calls[0]?.[1] as { agentId?: string } | undefined;
+    expect(call?.agentId).toBeTruthy();
+  });
+
   it('fills tool_use_id/spawn_depth/description from the .meta.json sidecar on SubagentStop', async () => {
     readSubagentMetaMock.mockResolvedValue({ toolUseId: 'tu-sidecar', spawnDepth: 2, description: 'task' });
     const plugin = new ClaudeCodeOtlpPlugin();
