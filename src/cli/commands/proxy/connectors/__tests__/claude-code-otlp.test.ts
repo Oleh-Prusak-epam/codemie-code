@@ -2,6 +2,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { existsSync } from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
 import { mkdtemp, mkdir, writeFile, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,6 +23,17 @@ import { resolveHomeDir } from '@/utils/paths.js';
 import { logger } from '@/utils/logger.js';
 import { sanitizeLogArgs } from '@/utils/security.js';
 import { ConfigurationError } from '@/utils/errors.js';
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  // `unlink` is wrapped (not replaced) so tests can simulate an EPERM-style
+  // failure on one call via mockRejectedValueOnce while every other call
+  // (and every other test, which never touches this mock) behaves exactly
+  // like the real fs. ESM module namespaces aren't spy-able directly
+  // (`vi.spyOn` on the real module throws "module namespace is not
+  // configurable"), so this is done at mock-factory time instead.
+  return { ...actual, unlink: vi.fn(actual.unlink) };
+});
 
 vi.mock('../../daemon-manager.js', () => ({
   readState: vi.fn(),
@@ -303,16 +315,30 @@ describe('claude-code-otlp connector', () => {
         const settingsPath = join(homeDir, '.claude', 'settings.json');
         await mkdir(join(homeDir, '.claude'), { recursive: true });
 
-        // Codemie's own env keys (including the live bearer token, matching
-        // the current proxy session so it is not flagged as a conflict) are
-        // present, but the hook group was stripped by some other process — no
-        // codemie hook command anywhere. No backup exists yet.
+        // Codemie's own env keys (both ENDPOINT and HEADERS — codemie always
+        // writes them as a pair, never one without the other) are present, but
+        // the hook group was stripped by some other process — no codemie hook
+        // command anywhere. No backup exists yet.
+        //
+        // Deliberately NOT testing HEADERS alone with no ENDPOINT: that state
+        // is not one codemie's own write path can ever produce, and recognizing
+        // it would require trusting an exact match on the daemon's gateway key
+        // alone — which defaults to a fixed, non-secret, user-visible string
+        // (`daemon-manager.ts`'s `spawnDaemon` default) when none is configured,
+        // making that match no stronger a signal than the generic
+        // `Authorization=Bearer ` prefix `isCodemieOwnedEnvValue` already
+        // refuses to trust by itself (see the "own unrelated Bearer-auth
+        // collector" regression test below).
         await writeFile(
           settingsPath,
           JSON.stringify(
             {
               theme: 'dark',
-              env: { FOO: 'bar', OTEL_EXPORTER_OTLP_HEADERS: `Authorization=Bearer ${mockState.gatewayKey}` },
+              env: {
+                FOO: 'bar',
+                OTEL_EXPORTER_OTLP_ENDPOINT: `${mockState.url}/v1/analytics/otlp`,
+                OTEL_EXPORTER_OTLP_HEADERS: `Authorization=Bearer ${mockState.gatewayKey}`,
+              },
             },
             null, 2
           )
@@ -731,10 +757,9 @@ describe('claude-code-otlp connector', () => {
         // must never come back, even though it's the only backup available.
         await writeFile(backupPath, JSON.stringify({ env: { STEP: 'B' } }, null, 2));
 
-        const codemieOnlyEnv = CODEMIE_ENV_KEYS.reduce<Record<string, string>>((acc, key) => {
-          acc[key] = 'whatever';
-          return acc;
-        }, {});
+        // Real codemie-owned values (not a generic placeholder): ownership is
+        // now checked by VALUE, so a fake 'whatever' would no longer count as ours.
+        const codemieOnlyEnv = buildExpectedEnv(mockState);
         await writeFile(
           settingsPath,
           JSON.stringify(
@@ -758,10 +783,9 @@ describe('claude-code-otlp connector', () => {
         const settingsPath = join(homeDir, '.claude', 'settings.json');
         await mkdir(join(homeDir, '.claude'), { recursive: true });
 
-        const codemieOnlyEnv = CODEMIE_ENV_KEYS.reduce<Record<string, string>>((acc, key) => {
-          acc[key] = 'whatever';
-          return acc;
-        }, {});
+        // Real codemie-owned values (not a generic placeholder): ownership is
+        // now checked by VALUE, so a fake 'whatever' would no longer count as ours.
+        const codemieOnlyEnv = buildExpectedEnv(mockState);
         await writeFile(
           settingsPath,
           JSON.stringify(
@@ -890,6 +914,198 @@ describe('claude-code-otlp connector', () => {
 
         expect(existsSync(settingsPath)).toBe(false); // nothing foreign remained -> deleted, not restored
         expect(existsSync(backupPath)).toBe(false);
+      });
+    });
+
+    describe('regression: ownership is checked by VALUE, not by key presence', () => {
+      it('preserves the user\'s own OTEL setup (endpoint, header with a secret) through force-connect + disconnect, even though CLAUDE_CODE_ENABLE_TELEMETRY coincidentally already equals codemie\'s own value', async () => {
+        const settingsPath = join(homeDir, '.claude', 'settings.json');
+        const backupPath = settingsPath + SETTINGS_BACKUP_SUFFIX;
+        await mkdir(join(homeDir, '.claude'), { recursive: true });
+
+        // A real pre-existing telemetry setup pointed at the user's own collector.
+        // CLAUDE_CODE_ENABLE_TELEMETRY is '1' here too — a value that happens to be
+        // identical to codemie's own fixed value, but for an unrelated reason.
+        await writeFile(
+          settingsPath,
+          JSON.stringify(
+            {
+              env: {
+                CLAUDE_CODE_ENABLE_TELEMETRY: '1',
+                OTEL_EXPORTER_OTLP_ENDPOINT: 'https://collector.corp.example',
+                OTEL_EXPORTER_OTLP_HEADERS: 'x-api-key=USER-SECRET',
+                KEEP: '1',
+              },
+            },
+            null,
+            2
+          )
+        );
+
+        await writeClaudeCodeOtlpConfig({ force: true });
+        expect(existsSync(backupPath)).toBe(true);
+        const backupAfterConnect = await readJson(backupPath);
+        expect(backupAfterConnect.env.OTEL_EXPORTER_OTLP_ENDPOINT).toBe('https://collector.corp.example');
+        expect(backupAfterConnect.env.OTEL_EXPORTER_OTLP_HEADERS).toBe('x-api-key=USER-SECRET');
+
+        await removeClaudeCodeOtlpConfig();
+
+        const final = await readJson(settingsPath);
+        expect(final.env.OTEL_EXPORTER_OTLP_ENDPOINT).toBe('https://collector.corp.example');
+        expect(final.env.OTEL_EXPORTER_OTLP_HEADERS).toBe('x-api-key=USER-SECRET');
+        expect(final.env.KEEP).toBe('1');
+        expect(existsSync(backupPath)).toBe(false);
+      });
+
+      it('keeps a user edit of a codemie-managed env key made directly in the file after connect (AC3), even with no backup involved', async () => {
+        const settingsPath = join(homeDir, '.claude', 'settings.json');
+        await mkdir(join(homeDir, '.claude'), { recursive: true });
+
+        await writeFile(settingsPath, JSON.stringify({ theme: 'dark' }, null, 2));
+        await writeClaudeCodeOtlpConfig();
+
+        // User points OTEL_LOGS_EXPORTER at their own collector after connecting.
+        const afterConnect = await readJson(settingsPath);
+        afterConnect.env.OTEL_LOGS_EXPORTER = 'console';
+        await writeFile(settingsPath, JSON.stringify(afterConnect, null, 2));
+
+        await removeClaudeCodeOtlpConfig();
+
+        const final = await readJson(settingsPath);
+        expect(final.env.OTEL_LOGS_EXPORTER).toBe('console');
+        expect(final.theme).toBe('dark');
+      });
+
+      it('does not throw when a codemie-managed env key has been nulled out in the JSON', async () => {
+        const settingsPath = join(homeDir, '.claude', 'settings.json');
+        await mkdir(join(homeDir, '.claude'), { recursive: true });
+
+        await writeFile(settingsPath, JSON.stringify({ theme: 'dark' }, null, 2));
+        await writeClaudeCodeOtlpConfig();
+
+        const afterConnect = await readJson(settingsPath);
+        afterConnect.env.OTEL_EXPORTER_OTLP_ENDPOINT = null;
+        afterConnect.env.OTEL_EXPORTER_OTLP_HEADERS = null;
+        await writeFile(settingsPath, JSON.stringify(afterConnect, null, 2));
+
+        await expect(removeClaudeCodeOtlpConfig()).resolves.not.toThrow();
+      });
+
+      it('(finding #4) does not restore a stale codemie header onto a user\'s own unrelated Bearer-auth collector set up after connect', async () => {
+        const settingsPath = join(homeDir, '.claude', 'settings.json');
+        await mkdir(join(homeDir, '.claude'), { recursive: true });
+
+        await writeFile(settingsPath, JSON.stringify({ theme: 'dark' }, null, 2));
+        await writeClaudeCodeOtlpConfig({ force: true }); // displaces nothing here, just establishes a connected file
+
+        // User repoints BOTH endpoint and header at their own unrelated collector.
+        // 'Authorization=Bearer ...' alone is the generic HTTP auth scheme, not
+        // something unique to codemie, so this must not be misread as "ours".
+        const afterConnect = await readJson(settingsPath);
+        afterConnect.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'https://my-own-collector.example/v1/traces';
+        afterConnect.env.OTEL_EXPORTER_OTLP_HEADERS = 'Authorization=Bearer MY-OWN-TOKEN';
+        await writeFile(settingsPath, JSON.stringify(afterConnect, null, 2));
+
+        await removeClaudeCodeOtlpConfig();
+
+        const final = await readJson(settingsPath);
+        expect(final.env.OTEL_EXPORTER_OTLP_ENDPOINT).toBe('https://my-own-collector.example/v1/traces');
+        expect(final.env.OTEL_EXPORTER_OTLP_HEADERS).toBe('Authorization=Bearer MY-OWN-TOKEN');
+      });
+
+      it('(finding #4, CRITICAL regression guard) a foreign Bearer header equal to the DEFAULT, non-secret gateway key, with no matching ENDPOINT, is never treated as codemie-owned', async () => {
+        // `spawnDaemon`'s default gatewayKey ('codemie-proxy' in daemon-manager.ts)
+        // is a fixed, non-secret, user-visible string whenever no key is
+        // explicitly configured — the normal `proxy start`/connect flow never
+        // supplies one. So matching HEADERS alone against "today's live value"
+        // would be no stronger a signal than the generic `Authorization=Bearer `
+        // prefix this file already refuses to trust by itself — codemie's
+        // ownership check must never let HEADERS prove itself without its
+        // sibling ENDPOINT also looking like codemie's own.
+        // Hooks already carry codemie's marker (so `alreadyManaged` is true via
+        // hooks alone and the "already managed" strip-and-rebuild path — not
+        // the unrelated "first connect" raw-copy path — is what's actually
+        // under test here), while HEADERS alone coincidentally equals the
+        // default gateway key, with no matching ENDPOINT alongside it.
+        const settingsPath = join(homeDir, '.claude', 'settings.json');
+        await mkdir(join(homeDir, '.claude'), { recursive: true });
+        await writeFile(
+          settingsPath,
+          JSON.stringify(
+            {
+              theme: 'dark',
+              hooks: { PreToolUse: [codemieHookGroup()] },
+              env: { FOO: 'bar', OTEL_EXPORTER_OTLP_HEADERS: 'Authorization=Bearer codemie-proxy' },
+            },
+            null, 2
+          )
+        );
+
+        const result = await writeClaudeCodeOtlpConfig({ force: true }); // conflicting HEADERS value requires --force regardless
+
+        const backup = await readJson(result.backupPath!);
+        expect(backup).toEqual({ theme: 'dark', env: { FOO: 'bar', OTEL_EXPORTER_OTLP_HEADERS: 'Authorization=Bearer codemie-proxy' } });
+      });
+    });
+
+    describe('regression: finding #5 — a malformed hook `--force` displaces is restored like a displaced env value', () => {
+      it('restores a malformed Stop hook `--force` dropped at connect, on disconnect, if the user never replaced it', async () => {
+        const settingsPath = join(homeDir, '.claude', 'settings.json');
+        await mkdir(join(homeDir, '.claude'), { recursive: true });
+
+        await writeFile(
+          settingsPath,
+          JSON.stringify({ hooks: { Stop: { command: 'my-own-stop.sh' } }, env: { KEEP: '1' } }, null, 2)
+        );
+
+        await writeClaudeCodeOtlpConfig({ force: true });
+        const afterConnect = await readJson(settingsPath);
+        expect(Array.isArray(afterConnect.hooks.Stop)).toBe(true); // malformed value was replaced with our array
+
+        await removeClaudeCodeOtlpConfig();
+
+        const final = await readJson(settingsPath);
+        expect(final.hooks?.Stop).toEqual({ command: 'my-own-stop.sh' });
+        expect(final.env.KEEP).toBe('1');
+      });
+
+      it('does NOT restore a displaced malformed hook if the user replaced that event with their own entry after connect (AC3)', async () => {
+        const settingsPath = join(homeDir, '.claude', 'settings.json');
+        await mkdir(join(homeDir, '.claude'), { recursive: true });
+
+        await writeFile(
+          settingsPath,
+          JSON.stringify({ hooks: { Stop: { command: 'my-own-stop.sh' } } }, null, 2)
+        );
+        await writeClaudeCodeOtlpConfig({ force: true });
+
+        // User replaces the Stop hook with their own valid entry after connecting.
+        const afterConnect = await readJson(settingsPath);
+        afterConnect.hooks.Stop = [{ matcher: '', hooks: [{ type: 'command', command: 'my-new-own-stop.sh' }] }];
+        await writeFile(settingsPath, JSON.stringify(afterConnect, null, 2));
+
+        await removeClaudeCodeOtlpConfig();
+
+        const final = await readJson(settingsPath);
+        expect(final.hooks.Stop).toEqual([{ matcher: '', hooks: [{ type: 'command', command: 'my-new-own-stop.sh' }] }]);
+      });
+
+      it('carries a displaced malformed hook forward into a refreshed backup across a reconnect with no intervening disconnect', async () => {
+        const settingsPath = join(homeDir, '.claude', 'settings.json');
+        const backupPath = settingsPath + SETTINGS_BACKUP_SUFFIX;
+        await mkdir(join(homeDir, '.claude'), { recursive: true });
+
+        await writeFile(
+          settingsPath,
+          JSON.stringify({ hooks: { Stop: { command: 'my-own-stop.sh' } } }, null, 2)
+        );
+        await writeClaudeCodeOtlpConfig({ force: true }); // connect #1: displaces the malformed hook into the backup
+
+        // Reconnect (e.g. --scope project), no disconnect in between.
+        await writeClaudeCodeOtlpConfig({ scope: 'project' });
+
+        const backup = await readJson(backupPath);
+        expect(backup.hooks?.Stop).toEqual({ command: 'my-own-stop.sh' });
       });
     });
 
@@ -1093,6 +1309,110 @@ describe('claude-code-otlp connector', () => {
         g.hooks.some((h: any) => h.command.includes(CODEMIE_COMMAND_MARKER))
       );
       expect(stillHasCodemieCommand).toBe(false);
+    });
+  });
+
+  describe('regression: defensive hardening (findings #10, #11)', () => {
+    it('(finding #10) a non-string value in the backup file is dropped, never raw-copied into the live settings', async () => {
+      const settingsPath = join(homeDir, '.claude', 'settings.json');
+      const backupPath = settingsPath + SETTINGS_BACKUP_SUFFIX;
+      await mkdir(join(homeDir, '.claude'), { recursive: true });
+
+      // Live file: codemie's own hook marker + codemie's own current value for
+      // OTEL_LOGS_EXPORTER (so disconnect's ownership gate actually strips it
+      // and considers it a candidate for restoration), plus one genuine
+      // foreign key.
+      await writeFile(
+        settingsPath,
+        JSON.stringify(
+          {
+            hooks: { Stop: [codemieHookGroup()] },
+            env: { FOO: 'bar', OTEL_LOGS_EXPORTER: 'otlp' },
+          },
+          null, 2
+        )
+      );
+      // Backup file corrupted (e.g. hand-edited, or written by an older/foreign
+      // tool): a non-string value under a CODEMIE_ENV_KEYS member.
+      await writeFile(backupPath, JSON.stringify({ env: { OTEL_LOGS_EXPORTER: 42 } }, null, 2));
+
+      await removeClaudeCodeOtlpConfig();
+
+      const final = await readJson(settingsPath);
+      expect(final.env).toEqual({ FOO: 'bar' });
+      expect(final.env.OTEL_LOGS_EXPORTER).toBeUndefined();
+    });
+
+    it('(finding #11) disconnect succeeds even when removing the stale backup file fails (e.g. EPERM)', async () => {
+      const settingsPath = join(homeDir, '.claude', 'settings.json');
+      const backupPath = settingsPath + SETTINGS_BACKUP_SUFFIX;
+      await mkdir(join(homeDir, '.claude'), { recursive: true });
+      await writeFile(settingsPath, JSON.stringify({ env: { FOO: 'bar' } }, null, 2));
+
+      await writeClaudeCodeOtlpConfig();
+      expect(existsSync(backupPath)).toBe(true);
+
+      vi.mocked(fsPromises.unlink).mockRejectedValueOnce(
+        Object.assign(new Error('EPERM: operation not permitted, unlink'), { code: 'EPERM' })
+      );
+
+      const result = await removeClaudeCodeOtlpConfig();
+
+      expect(fsPromises.unlink).toHaveBeenCalledWith(backupPath);
+      expect(result.removed).toBe(true);
+      const final = await readJson(settingsPath);
+      expect(final.env.FOO).toBe('bar');
+      expect(logger.warn).toHaveBeenCalled();
+    });
+  });
+
+  describe('regression: symmetric ENDPOINT/HEADERS pairing and value-gated allowlist key', () => {
+    it('does not treat a foreign ENDPOINT as codemie-owned just because it happens to share our path suffix, when HEADERS does not pair with it', async () => {
+      const settingsPath = join(homeDir, '.claude', 'settings.json');
+      await mkdir(join(homeDir, '.claude'), { recursive: true });
+
+      // Hooks already carry codemie's marker (alreadyManaged=true via hooks),
+      // while the user's own collector coincidentally uses the same
+      // '/v1/analytics/otlp' path suffix but a non-Bearer auth scheme.
+      await writeFile(
+        settingsPath,
+        JSON.stringify(
+          {
+            hooks: { Stop: [codemieHookGroup()] },
+            env: { OTEL_EXPORTER_OTLP_ENDPOINT: 'https://my-own-collector.example/v1/analytics/otlp', OTEL_EXPORTER_OTLP_HEADERS: 'x-api-key=USER-SECRET' },
+          },
+          null, 2
+        )
+      );
+
+      const result = await writeClaudeCodeOtlpConfig({ force: true });
+
+      const backup = await readJson(result.backupPath!);
+      expect(backup.env).toEqual({
+        OTEL_EXPORTER_OTLP_ENDPOINT: 'https://my-own-collector.example/v1/analytics/otlp',
+        OTEL_EXPORTER_OTLP_HEADERS: 'x-api-key=USER-SECRET',
+      });
+    });
+
+    it('preserves an unrelated env var that happens to share the allowlist key name but holds a non-allowlist value', async () => {
+      const settingsPath = join(homeDir, '.claude', 'settings.json');
+      await mkdir(join(homeDir, '.claude'), { recursive: true });
+
+      await writeFile(
+        settingsPath,
+        JSON.stringify(
+          {
+            hooks: { Stop: [codemieHookGroup()] },
+            env: { [CODEMIE_ANALYTICS_PROJECT_FILTER_ENV]: 'not-a-json-array-at-all' },
+          },
+          null, 2
+        )
+      );
+
+      await removeClaudeCodeOtlpConfig();
+
+      const final = await readJson(settingsPath);
+      expect(final.env[CODEMIE_ANALYTICS_PROJECT_FILTER_ENV]).toBe('not-a-json-array-at-all');
     });
   });
 });
