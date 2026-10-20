@@ -88,6 +88,72 @@ export const CODEMIE_ENV_KEYS = [
   'OTEL_LOG_TOOL_DETAILS',
 ] as const;
 
+// Fixed values codemie writes for every key except the two daemon-derived
+// ones (OTEL_EXPORTER_OTLP_ENDPOINT/HEADERS, which embed the live proxy URL
+// and gateway key). Lets disconnect recognize "codemie's own value" without a
+// live daemon — disconnect never reads daemon state.
+const CODEMIE_ENV_FIXED_VALUES: Partial<Record<(typeof CODEMIE_ENV_KEYS)[number], string>> = {
+  CLAUDE_CODE_ENABLE_TELEMETRY: '1',
+  CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: '1',
+  OTEL_EXPORTER_OTLP_PROTOCOL: 'http/protobuf',
+  OTEL_LOGS_EXPORTER: 'otlp',
+  OTEL_METRICS_EXPORTER: 'otlp',
+  OTEL_TRACES_EXPORTER: 'otlp',
+  OTEL_LOG_TOOL_DETAILS: '1',
+};
+
+/**
+ * True if `value` is (still) codemie's own value for `key`, checked without
+ * needing a live daemon: the two daemon-derived keys are matched by the fixed
+ * suffix/prefix codemie always writes around the variable URL/token, the rest
+ * by their fixed literal value.
+ */
+function isCodemieOwnedEnvValue(key: (typeof CODEMIE_ENV_KEYS)[number], value: string): boolean {
+  if (key === 'OTEL_EXPORTER_OTLP_ENDPOINT') {
+    return value.endsWith('/v1/analytics/otlp');
+  }
+  if (key === 'OTEL_EXPORTER_OTLP_HEADERS') {
+    return value.startsWith('Authorization=Bearer ');
+  }
+  return CODEMIE_ENV_FIXED_VALUES[key] === value;
+}
+
+/**
+ * Puts a value a `--force` connect once displaced into `backupEnv` back into
+ * `baseEnv`, for any CODEMIE_ENV_KEYS key `baseEnv` doesn't already hold —
+ * but only while `liveEnv` still carries codemie's OWN value for that key
+ * right now. If the user touched it again since, the live value no longer
+ * matches and this leaves `baseEnv` alone for that key.
+ *
+ * Shared by the connect-side backup refresh (carrying a displaced value
+ * forward into the freshly rebuilt backup) and the disconnect-side restore
+ * (putting a displaced value back into the live file being written).
+ *
+ * Returns `undefined` (never `{}`) when the result has no keys, so callers
+ * can `delete` the settings' `env` key instead of leaving an empty object.
+ */
+function withDisplacedEnvValues(
+  baseEnv: Record<string, string> | undefined,
+  backupEnv: Record<string, string> | undefined,
+  liveEnv: Record<string, string>
+): Record<string, string> | undefined {
+  if (!backupEnv) {
+    return baseEnv;
+  }
+  const merged: Record<string, string> = { ...(baseEnv ?? {}) };
+  for (const key of CODEMIE_ENV_KEYS) {
+    if (merged[key] !== undefined) {
+      continue;
+    }
+    const backupValue = backupEnv[key];
+    const liveValue = liveEnv[key];
+    if (backupValue !== undefined && liveValue !== undefined && isCodemieOwnedEnvValue(key, liveValue)) {
+      merged[key] = backupValue;
+    }
+  }
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
 export const HOOK_EVENTS = [
   'SessionStart',
   'Stop',
@@ -251,6 +317,27 @@ function stripCodemieManagedContent(existing: ClaudeSettings): StripCodemieManag
   return { stripped, removedHookCommands, removedEnvKeys };
 }
 
+/**
+ * Best-effort read of the backup file. Unlike `readSettingsFile`, never
+ * throws: a missing, unreadable or corrupt backup just means nothing to
+ * restore/carry forward from, not a connect/disconnect failure.
+ */
+async function readBackupSettings(backupPath: string): Promise<ClaudeSettings | null> {
+  if (!existsSync(backupPath)) {
+    return null;
+  }
+  try {
+    const raw = await readFile(backupPath, 'utf-8');
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      return parsed as ClaudeSettings;
+    }
+  } catch {
+    // Corrupt/unreadable backup — nothing to restore, but the caller must still proceed.
+  }
+  return null;
+}
+
 export async function writeClaudeCodeOtlpConfig(
   opts: WriteClaudeCodeOtlpOptions = {}
 ): Promise<WriteClaudeCodeOtlpResult> {
@@ -266,16 +353,10 @@ export async function writeClaudeCodeOtlpConfig(
   const existingHooksBlock = existing.hooks ?? {};
 
   const codemieEnv: Record<(typeof CODEMIE_ENV_KEYS)[number], string> = {
-    CLAUDE_CODE_ENABLE_TELEMETRY: '1',
-    CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: '1',
+    ...CODEMIE_ENV_FIXED_VALUES,
     OTEL_EXPORTER_OTLP_ENDPOINT: `${state.url}/v1/analytics/otlp`,
     OTEL_EXPORTER_OTLP_HEADERS: `Authorization=Bearer ${state.gatewayKey}`,
-    OTEL_EXPORTER_OTLP_PROTOCOL: 'http/protobuf',
-    OTEL_LOGS_EXPORTER: 'otlp',
-    OTEL_METRICS_EXPORTER: 'otlp',
-    OTEL_TRACES_EXPORTER: 'otlp',
-    OTEL_LOG_TOOL_DETAILS: '1',
-  };
+  } as Record<(typeof CODEMIE_ENV_KEYS)[number], string>;
 
   // --- Conflict detection: env values AND malformed (non-array) hooks entries ---
   const existingEnv = existing.env ?? {};
@@ -336,21 +417,35 @@ export async function writeClaudeCodeOtlpConfig(
       (entries) => Array.isArray(entries) && entries.some(groupContainsCodemieCommand)
     ) || CODEMIE_ENV_KEYS.some((key) => existingEnv[key] === codemieEnv[key]);
     if (alreadyManaged) {
-      if (existsSync(backupPathCandidate)) {
-        // Trustworthy pre-connect snapshot already captured; leave it alone.
-        backupPath = backupPathCandidate;
+      // Already managed: always refresh (AC1 — a later connect can still
+      // modify the live file further, e.g. an allowlist change, and the
+      // backup must reflect THAT pre-connect state, not whichever one was
+      // captured first). Rebuild by stripping our own content rather than
+      // copying the file as-is, which would enshrine our own writes
+      // (including the OTLP bearer token) as the "pre-connect original".
+      const { stripped } = stripCodemieManagedContent(existing);
+
+      // Carry forward a value a PRIOR --force connect displaced into the
+      // existing backup: it is no longer present in `existing` itself
+      // (codemie's own write replaced it), so stripping `existing` alone
+      // would silently drop it from the refreshed backup.
+      const oldBackup = await readBackupSettings(backupPathCandidate);
+      const mergedEnv = withDisplacedEnvValues(stripped.env, oldBackup?.env, existingEnv);
+      if (mergedEnv) {
+        stripped.env = mergedEnv;
       } else {
-        // Managed but the backup is gone. Copying the file as-is would
-        // enshrine our own writes (including the OTLP bearer token) as the
-        // "pre-connect original" — rebuild it by stripping our own content
-        // instead. Nothing to protect (and no backup needed) if that leaves
-        // zero foreign keys — e.g. a fresh install that only ever held our
-        // own entries.
-        const { stripped } = stripCodemieManagedContent(existing);
-        if (Object.keys(stripped).length > 0) {
-          await writeAtomically(backupPathCandidate, JSON.stringify(stripped, null, 2) + '\n');
-          backupPath = backupPathCandidate;
-        }
+        delete stripped.env;
+      }
+
+      // Nothing to protect (and no backup needed) if that leaves zero
+      // foreign keys — e.g. a fresh install that only ever held our own
+      // entries. Drop a stale backup from an earlier cycle rather than
+      // leave outdated content behind.
+      if (Object.keys(stripped).length > 0) {
+        await writeAtomically(backupPathCandidate, JSON.stringify(stripped, null, 2) + '\n');
+        backupPath = backupPathCandidate;
+      } else if (existsSync(backupPathCandidate)) {
+        await unlink(backupPathCandidate);
       }
     } else {
       // Not yet managed: always (re)snapshot, overwriting any stale previous backup.
@@ -480,12 +575,26 @@ export async function removeClaudeCodeOtlpConfig(
   }
 
   const backupPath = settingsPath + SETTINGS_BACKUP_SUFFIX;
+  const backupSettings = await readBackupSettings(backupPath);
+
+  // Put back a value a `--force` connect displaced into the backup (preserves
+  // AC3 — never resurrects a value the user changed after connect; see
+  // `withDisplacedEnvValues`).
+  const restoredEnv = withDisplacedEnvValues(stripped.env, backupSettings?.env, existing.env ?? {});
+  if (restoredEnv) {
+    stripped.env = restoredEnv;
+  } else {
+    delete stripped.env;
+  }
+
   const isEmpty = Object.keys(stripped).length === 0;
 
   // Always derive the result from the CURRENT live content (never restore raw
   // backup bytes, however fresh): a backup can still hold a value the user
   // changed or removed between the connect that captured it and this
-  // disconnect, and restoring it would resurrect exactly that value.
+  // disconnect, and restoring it would resurrect exactly that value. The
+  // exception above is narrow and key-scoped: a value `--force` displaced and
+  // that codemie still owns right now is put back instead of deleted.
   if (isEmpty) {
     await unlink(settingsPath);
   } else {
