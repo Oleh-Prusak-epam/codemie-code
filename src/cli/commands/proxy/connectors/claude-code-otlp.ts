@@ -259,13 +259,9 @@ async function readSettingsFile(settingsPath: string): Promise<ClaudeSettings> {
 }
 
 /**
- * True if a single hook entry (`{ type: 'command', command: '...' }`) is one
- * that codemie itself would write, identified by the command marker.
- *
- * This is intentionally the finest granularity we ever check at for
- * destructive operations (add/replace/remove) — never classify a whole hook
- * GROUP as "ours" for that purpose, since a group's `hooks[]` array may mix
- * our command with a user's own command(s).
+ * True if a single hook entry is one codemie itself would write (matched
+ * by the command marker). Deliberately the finest granularity checked for
+ * destructive ops — a hook GROUP may mix our command with the user's own.
  */
 function isHookEntry(h: unknown): h is HookEntry {
   return typeof h === 'object' && h !== null && typeof (h as HookEntry).command === 'string';
@@ -290,14 +286,10 @@ function groupContainsCodemieCommand(group: unknown): boolean {
 }
 
 /**
- * Given an existing array of hook groups for one event, returns a new array
- * with our own command(s) stripped out at the COMMAND level:
- *  - a group that still has foreign command(s) left is kept, with our
- *    command(s) removed and everything else (matcher, extra fields) intact;
- *  - a group that contained ONLY our command(s) is dropped entirely;
- *  - malformed/unrecognized entries are preserved as-is.
- *
- * Shared by both the connect (write) and disconnect (remove) paths.
+ * Strips our own command(s) out of each hook group for one event: a group
+ * left with foreign commands keeps them (plus matcher/extra fields); a
+ * group that was ours only is dropped; malformed entries pass through.
+ * Shared by the connect and disconnect paths.
  */
 function stripCodemieCommandsFromGroups(existingGroups: unknown[]): unknown[] {
   const result: unknown[] = [];
@@ -513,12 +505,10 @@ export async function writeClaudeCodeOtlpConfig(
       isCodemieOwnedEnvValue(key, existingEnv[key], existingEnv)
     );
     if (alreadyManaged) {
-      // Already managed: always refresh (AC1 — a later connect can still
-      // modify the live file further, e.g. an allowlist change, and the
-      // backup must reflect THAT pre-connect state, not whichever one was
-      // captured first). Rebuild by stripping our own content rather than
-      // copying the file as-is, which would enshrine our own writes
-      // (including the OTLP bearer token) as the "pre-connect original".
+      // Already managed: always refresh (AC1 — a later connect still modifies
+      // the live file, so the backup must reflect THAT pre-connect state).
+      // Rebuilt by stripping, not copying as-is, so our own writes (including
+      // the bearer token) are never enshrined as the "original".
       const { stripped } = stripCodemieManagedContent(existing);
 
       // Carry forward a value a PRIOR --force connect displaced into the
@@ -543,10 +533,8 @@ export async function writeClaudeCodeOtlpConfig(
         delete stripped.hooks;
       }
 
-      // Nothing to protect (and no backup needed) if that leaves zero
-      // foreign keys — e.g. a fresh install that only ever held our own
-      // entries. Drop a stale backup from an earlier cycle rather than
-      // leave outdated content behind.
+      // Zero foreign keys left (e.g. a fresh install) means nothing to
+      // protect — drop any stale backup from an earlier cycle instead.
       if (Object.keys(stripped).length > 0) {
         await writeAtomically(backupPathCandidate, JSON.stringify(stripped, null, 2) + '\n');
         backupPath = backupPathCandidate;
@@ -714,12 +702,10 @@ export async function removeClaudeCodeOtlpConfig(
 
   const isEmpty = Object.keys(stripped).length === 0;
 
-  // Always derive the result from the CURRENT live content (never restore raw
-  // backup bytes, however fresh): a backup can still hold a value the user
-  // changed or removed between the connect that captured it and this
-  // disconnect, and restoring it would resurrect exactly that value. The
-  // exception above is narrow and key-scoped: a value `--force` displaced and
-  // that codemie still owns right now is put back instead of deleted.
+  // Always derive the result from the CURRENT live content, never raw backup
+  // bytes — a backup can hold a value the user changed/removed since connect.
+  // The one exception: a value `--force` displaced, restored above only
+  // while codemie still owns it right now.
   if (isEmpty) {
     await unlink(settingsPath);
   } else {

@@ -26,12 +26,10 @@ import { ConfigurationError } from '@/utils/errors.js';
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  // `unlink` is wrapped (not replaced) so tests can simulate an EPERM-style
-  // failure on one call via mockRejectedValueOnce while every other call
-  // (and every other test, which never touches this mock) behaves exactly
-  // like the real fs. ESM module namespaces aren't spy-able directly
-  // (`vi.spyOn` on the real module throws "module namespace is not
-  // configurable"), so this is done at mock-factory time instead.
+  // `unlink` wrapped (not replaced) so a test can simulate one EPERM-style
+  // failure via mockRejectedValueOnce; vi.spyOn can't do this directly —
+  // ESM module namespaces aren't spy-able ("module namespace is not
+  // configurable").
   return { ...actual, unlink: vi.fn(actual.unlink) };
 });
 
