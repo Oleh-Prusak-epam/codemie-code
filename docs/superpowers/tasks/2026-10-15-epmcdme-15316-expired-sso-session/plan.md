@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **POST-PLAN AMENDMENT (2026-10-16, commit `0cfd1b1c`):** Live reproduction on 2026-10-16 showed the "confirmed-expired branch" gate below (redirect signature AND the proxy's own stored credential past its `expiresAt`) misses the primary real-world trigger: a server-side session revoke (e.g. signing out of all sessions) does not change the local JWT's own `exp` claim, so requiring both signals let the actual bug recur. The shipped `SSOSessionExpiryPlugin` therefore acts on the `302`/`303` → `/oauth2/start` redirect signature **alone** — it no longer reads or compares `expiresAt` at all. Nothing else has ever been observed to produce this exact redirect, so no secondary confirming signal is required. The Global Constraints and Acceptance Criteria below are left as originally written for traceability, but the bullets marked **[SUPERSEDED]** no longer describe the shipped behavior — see `sso-session-expiry.plugin.ts` and its test file for the actual (gate-less) logic. The PR description should be read with the same correction in mind.
+
 **Goal:** When the local SSO proxy's upstream response is the confirmed oauth2-proxy session-expiry redirect (302/303 to `/oauth2/start`) AND the proxy's own stored SSO credential is at/past its known expiry, replace the relayed response with a parseable 401 and feed PR #624's existing re-auth plumbing (`markAnalyticsAuthInvalid` + `startDetachedSsoLogin`) instead of letting Claude Code write a `<synthetic>` turn. Every other case (fresh credential, no redirect, generic 5xx) passes through unchanged.
 
 **Architecture:** A new sibling `ProxyInterceptor` plugin (not a modification of `SSOAuthInterceptor`) implements `onUpstreamResponse`. It never touches `sso.auth-gate.ts`, `sso.detached-login.ts`, or `analytics-auth-status.ts` — it only calls their existing exported functions, reusing the shared lock file/marker those already own so this call site and the `UserPromptSubmit` hook's call site never race.
@@ -13,18 +15,18 @@
 ## Global Constraints
 
 - SSO-only: JWT-based profiles must be unaffected — guard via `'cookies' in context.credentials`, matching `sso-auth.plugin.ts`'s existing pattern.
-- Never re-read credentials from disk/`CredentialStore` mid-session — compare only against the `expiresAt` already captured once at `createInterceptor()` time from `PluginContext.credentials`.
+- **[SUPERSEDED, see amendment above]** Never re-read credentials from disk/`CredentialStore` mid-session — compare only against the `expiresAt` already captured once at `createInterceptor()` time from `PluginContext.credentials`. *(Shipped: `expiresAt` is not read or compared at all — the plugin acts on the redirect signature alone.)*
 - Never spread the original 302's `headers` onto the synthesized 401 — build the 401's headers as a fresh object (no leaked `location`/`set-cookie`/`cache-control`).
-- Only call `markAnalyticsAuthInvalid`/`startDetachedSsoLogin` on the confirmed-expired branch (redirect signature AND expired credential). Never call either on a fresh-credential redirect or on a non-redirect response, and never relabel either of those as "session expired" — this is the guard against misdiagnosing nginx 503 / Cloudflare 502 blips.
+- **[PARTIALLY SUPERSEDED, see amendment above]** Only call `markAnalyticsAuthInvalid`/`startDetachedSsoLogin` on the confirmed-expired branch (redirect signature AND expired credential). Never call either on a fresh-credential redirect or on a non-redirect response, and never relabel either of those as "session expired" — this is the guard against misdiagnosing nginx 503 / Cloudflare 502 blips. *(Shipped: both are called on the redirect signature alone — "fresh-credential redirect" is no longer a distinct case. The non-redirect-response passthrough half of this constraint is unchanged and still holds.)*
 - Reason string passed to `markAnalyticsAuthInvalid` must name the `/oauth2/start` redirect specifically, not a generic phrase like `"session expired"`.
-- Do not modify `sso-auth.plugin.ts`, `sso.auth-gate.ts`, `sso.detached-login.ts`, or `analytics-auth-status.ts` — call their existing exports only.
+- **[SUPERSEDED, see amendment above — also out of scope for this amendment]** Do not modify `sso-auth.plugin.ts`, `sso.auth-gate.ts`, `sso.detached-login.ts`, or `analytics-auth-status.ts` — call their existing exports only. *(Shipped: `sso-auth.plugin.ts` was modified to re-read credentials per request, and `sso.detached-login.ts` was modified to close a lock-creation race — both named in the PR description as secondary fixes to Issue 1, outside this plan's original task breakdown. `sso.auth-gate.ts` and `analytics-auth-status.ts` were not touched.)*
 - No server-side (ingress/oauth2-proxy) changes; no changes to Root cause A, Root cause B, the claude-desktop filter issue, or the conversation-sync `<synthetic>`-leak follow-up.
 
 ## Review Focus
 
 - An upstream `503`/`502` HTML blip with no `/oauth2/start` redirect must never be relabeled "session expired" or trigger `markAnalyticsAuthInvalid`/`startDetachedSsoLogin` — Task 1's passthrough test pins this.
-- A `302`/`303` to `/oauth2/start` while the stored credential still looks fresh (not yet expired) must pass through unchanged and must not call either re-auth function — Task 1 pins this.
-- `expiresAt === undefined` (never derived) must be treated as "not confirmed expired", not as expired — Task 1 pins this.
+- **[SUPERSEDED, see amendment above]** A `302`/`303` to `/oauth2/start` while the stored credential still looks fresh (not yet expired) must pass through unchanged and must not call either re-auth function — Task 1 pins this. *(Shipped: this case now also triggers the 401 + re-auth flow — see `sso-session-expiry.plugin.test.ts`'s "also replaces the redirect with a 401 when the local credential still looks fresh" case, which asserts the opposite of this bullet.)*
+- **[SUPERSEDED, see amendment above]** `expiresAt === undefined` (never derived) must be treated as "not confirmed expired", not as expired — Task 1 pins this. *(Shipped: `expiresAt` is not read, so this distinction no longer applies — see the test's "also replaces the redirect with a 401 when expiresAt is undefined" case.)*
 - The synthesized 401 must not leak the original response's `location`/`set-cookie`/`cache-control` headers — Task 1 asserts the returned headers object excludes them.
 - A JWT-credentialed proxy (no `cookies` key) must get a no-op interceptor with `onUpstreamResponse` undefined — this logic can never fire for JWT profiles; Task 1 pins this.
 
@@ -34,13 +36,13 @@ negative-constraints: all covered above — no task violates them (Task 1 create
 
 ## Acceptance criteria
 
-- [ ] A `302`/`303` upstream response with `Location` containing `/oauth2/start`, while the proxy's in-memory SSO credential `expiresAt` is at/past `Date.now()`, is replaced with a `401` whose body is `{"type":"error","error":{"type":"authentication_error","message":"<re-login hint>"}}` and whose headers are built fresh (no leaked `location`/`set-cookie`/`cache-control`).
-- [ ] On that same confirmed-expired branch, `markAnalyticsAuthInvalid(reason, baseUrl)` is called once with a reason string naming the `/oauth2/start` redirect and `baseUrl === context.config.targetApiUrl`.
-- [ ] On that same branch, `startDetachedSsoLogin(codeMieUrl)` is called once with `codeMieUrl === context.config.targetApiUrl`.
-- [ ] The same redirect signature with a credential that is still fresh (`expiresAt` in the future, or undefined) passes through unchanged, and neither `markAnalyticsAuthInvalid` nor `startDetachedSsoLogin` is called.
-- [ ] Any upstream response without the `302/303` + `/oauth2/start` signature (including `5xx` infra errors) passes through unchanged, keeping its real status code, and neither re-auth function is called.
-- [ ] JWT-credentialed proxy instances get a no-op interceptor (`onUpstreamResponse` undefined) — this detection logic never fires for JWT profiles.
-- [ ] The new plugin is registered in the core plugin list with priority 11 (directly after `SSOAuthPlugin`/`JWTAuthPlugin`, before every other `onUpstreamResponse` plugin).
+- [x] **[AMENDED, see note above]** A `302`/`303` upstream response with `Location` containing `/oauth2/start` is replaced with a `401` whose body is `{"type":"error","error":{"type":"authentication_error","message":"<re-login hint>"}}` and whose headers are built fresh (no leaked `location`/`set-cookie`/`cache-control`). *(Shipped: no `expiresAt` condition — the redirect signature alone is sufficient; see amendment at the top of this file.)*
+- [x] On that same branch, `markAnalyticsAuthInvalid(reason, baseUrl)` is called once with a reason string naming the `/oauth2/start` redirect and `baseUrl === context.config.targetApiUrl`.
+- [x] On that same branch, `startDetachedSsoLogin(codeMieUrl)` is called once with `codeMieUrl === context.config.targetApiUrl`.
+- [ ] **[SUPERSEDED, see amendment above — not met as originally written]** The same redirect signature with a credential that is still fresh (`expiresAt` in the future, or undefined) passes through unchanged, and neither `markAnalyticsAuthInvalid` nor `startDetachedSsoLogin` is called. *(Shipped: this case now also triggers the 401 + re-auth flow — intentionally inverted per the amendment above.)*
+- [x] Any upstream response without the `302/303` + `/oauth2/start` signature (including `5xx` infra errors) passes through unchanged, keeping its real status code, and neither re-auth function is called.
+- [x] JWT-credentialed proxy instances get a no-op interceptor (`onUpstreamResponse` undefined) — this detection logic never fires for JWT profiles.
+- [x] The new plugin is registered in the core plugin list with priority 11 (directly after `SSOAuthPlugin`/`JWTAuthPlugin`, before every other `onUpstreamResponse` plugin).
 
 ---
 
