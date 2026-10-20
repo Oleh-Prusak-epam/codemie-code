@@ -480,6 +480,30 @@ describe('openMainTranscriptPass — api_calls', () => {
     // 2 main-thread requests (1 main + 1 skill); the subagent's request must not inflate this.
     expect(summary?.api_calls).toBe(2);
   });
+
+  it('excludes a forked skill subagent\'s already-persisted requests from a later Stop summary (EPMCDME-15968 regression)', async () => {
+    const sessionId = 'session-api-calls-forked-skill';
+    const file = writeSubagentFixture(sessionId, 'a1', [
+      usageLine({ uuid: 'uuid-a1-1', messageId: 'msg-a1-1', outputTokens: 30 }),
+      usageLine({ uuid: 'uuid-a1-2', messageId: 'msg-a1-2', outputTokens: 40 }),
+      usageLine({ uuid: 'uuid-a1-3', messageId: 'msg-a1-3', outputTokens: 50 }),
+    ]);
+    // A forked skill's subagent — its usage is persisted as scope_kind='skill' (same as a
+    // main-thread inline skill) via its own SubagentStop, *before* the main Stop below runs.
+    const subagentPass = await subagentEvents(sessionId, { ...file, skillName: 'code-review' });
+    expect(subagentPass.filter((e) => e.type === 'agent.usage.request')).toHaveLength(3);
+
+    const mainTranscriptPath = writeTranscript(`${sessionId}.jsonl`, [
+      usageLine({ uuid: 'u1', messageId: 'msg-1', outputTokens: 10 }),
+      usageLine({ uuid: 'u2', messageId: 'msg-2', outputTokens: 20 }),
+    ]);
+    const events = await mainEvents(sessionId, mainTranscriptPath, 'Stop');
+    const summary = events.find((e) => e.type === 'agent.session.summary');
+
+    // 2 main-thread requests only; the forked skill's 3 already-persisted subagent requests
+    // (scope_kind='skill', but with their own agentId) must not inflate this.
+    expect(summary?.api_calls).toBe(2);
+  });
 });
 
 describe('openMainTranscriptPass — skill scoping', () => {

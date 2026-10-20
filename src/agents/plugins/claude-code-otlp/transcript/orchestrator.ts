@@ -385,10 +385,11 @@ async function deriveMainEvents(
       startedAt,
       endedAt
     );
-    // Main-thread requests — 'main' and 'skill' are both made on the main thread; the
-    // contract's api_calls excludes only subagent ('agent') requests.
+    // Main-thread requests — 'main' and 'skill' are both made on the main thread, scoped with an
+    // empty agentId; the contract's api_calls excludes subagent requests, including a forked
+    // skill's (scopeKind: 'skill' too, but with its own agentId — see deriveSubagentEvents).
     summaryEvent.api_calls = Object.values(state.openRequests).filter(
-      (r) => r.scopeKind === 'main' || r.scopeKind === 'skill'
+      (r) => (r.scopeKind === 'main' || r.scopeKind === 'skill') && !r.agentId
     ).length;
     events.push(summaryEvent);
   }
@@ -681,8 +682,9 @@ export async function openSubagentPass(sessionId: string, subagentFile: Subagent
  * all against **one** in-memory `state` under **one** lock acquisition (so there is exactly one
  * save at the end, instead of one per collector as a loop of separate passes would do).
  *
- * The main transcript is derived first, so `api_calls` (computed from `scopeKind: 'main' | 'skill'`
- * records) can never be inflated by a subagent's records. A subagent whose offset already
+ * `api_calls` (computed from `scopeKind: 'main' | 'skill'` records with an empty `agentId`) is
+ * never inflated by a subagent's records, including a forked skill's own `scopeKind: 'skill'`
+ * ones — see the `agentId` guard in {@link deriveMainEvents}. A subagent whose offset already
  * covers its file ({@link subagentAlreadyCovered}) is skipped — its own `SubagentStop` (or an
  * earlier backstop run) already reported it. Sharing one `state` across subagents loses the
  * per-collector isolation separate passes would give it, so each subagent derivation first
