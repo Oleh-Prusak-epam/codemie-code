@@ -447,6 +447,23 @@ describe('ClaudeCodeOtlpPlugin.processOtlpEvent dispatch', () => {
     expect(subagentFilePathMock).toHaveBeenCalledWith('/tmp/transcript.jsonl', 'sub-named');
   });
 
+  it('skips SubagentStart entirely (no forward, no sidecar read) when agent_type is empty', async () => {
+    const plugin = new ClaudeCodeOtlpPlugin();
+    const rawEvent = JSON.stringify(
+      hookEvent({
+        hook_event_name: 'SubagentStart',
+        agent_id: 'sub-checkin',
+        agent_type: '',
+      })
+    );
+
+    await plugin.processOtlpEvent(rawEvent, { ensureOtlpProxy, forwardOtlpEventsToSpool });
+
+    expect(forwardOtlpEventsToSpool).not.toHaveBeenCalled();
+    expect(subagentFilePathMock).not.toHaveBeenCalled();
+    expect(readForkedSkillMarkerMock).not.toHaveBeenCalled();
+  });
+
   it('forwards every event a pass returns (the raw event plus any derived events) as one batch, in order', async () => {
     const derivedUsageEvent = { type: 'agent.usage.request' };
     const derivedSummaryEvent = { type: 'agent.session.summary' };
@@ -496,11 +513,11 @@ describe('ClaudeCodeOtlpPlugin wire type', () => {
   });
 
   const typeFor = async (name: string): Promise<unknown> => {
-    // A SubagentStop with no agent_type is Claude Code's own internal check-in, never
-    // forwarded (see the `claude-code-otlp.plugin.ts` guard) — give it one here so this
+    // A SubagentStart/SubagentStop with no agent_type is Claude Code's own internal check-in,
+    // never forwarded (see the `claude-code-otlp.plugin.ts` guards) — give it one here so this
     // generic wire-type matrix still exercises its mapping, like every other hook name.
     const raw =
-      name === 'SubagentStop'
+      name === 'SubagentStart' || name === 'SubagentStop'
         ? JSON.stringify({ session_id: 's', transcript_path: '', cwd: '/x', hook_event_name: name, agent_type: 'explore' })
         : event(name);
     await plugin.processOtlpEvent(raw, { ensureOtlpProxy, forwardOtlpEventsToSpool });

@@ -100,6 +100,11 @@ export class ClaudeCodeOtlpPlugin extends OtlpAgentAdapter<HookInput, UserPrompt
   }
 
   private async onSubagentStartEvent(hookInput: SubagentStartHookInput): Promise<ClaudeForwardDecision> {
+    if (!hookInput.agent_type) {
+      // Same internal check-in filter as onSubagentStopEvent — not a real subagent dispatch.
+      return { decision: 'forward', payload: [] };
+    }
+
     // SubagentStart carries no agent_transcript_path (unlike SubagentStop) — build the path from
     // the triggering hook's own transcript_path (the main transcript) and agent_id instead.
     const agentTranscriptPath = subagentFilePath(hookInput.transcript_path, hookInput.agent_id);

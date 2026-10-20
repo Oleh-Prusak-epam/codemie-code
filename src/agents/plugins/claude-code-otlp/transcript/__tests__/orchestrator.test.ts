@@ -810,6 +810,19 @@ describe('openSubagentPass — request identity', () => {
     ]);
   });
 
+  it('falls back to agentType for scope_name when SubagentFile.skillName is an empty string, keeping scope_kind=agent consistent with scope_name (EPMCDME-15968 regression)', async () => {
+
+    const sessionId = 'session-sub-empty-skill-name';
+    const file = writeSubagentFixture(sessionId, 'a1', [
+      usageLine({ uuid: 'u1', messageId: 'msg_a', outputTokens: 10 }),
+    ]);
+
+    const events = await subagentEvents(sessionId, { ...file, agentType: 'general-purpose', skillName: '' });
+    const usage = events.filter((e) => e.type === 'agent.usage.request');
+
+    expect(usage[0]).toMatchObject({ scope_kind: 'agent', scope_name: 'general-purpose' });
+  });
+
   it('carries agentType onto agent.subagent.usage\'s usage[] rows as scope_name, matching the contract\'s (model, speed, inference_geo, service_tier, scope_kind, scope_name) grouping key (EPMCDME-15783)', async () => {
 
     const sessionId = 'session-sub-usage-scope-name';

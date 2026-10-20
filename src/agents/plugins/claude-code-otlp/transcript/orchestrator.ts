@@ -610,7 +610,7 @@ async function deriveSubagentEvents(
   // `scope_kind: 'agent'` / `scope_name: <agentType>`. `agentId` is kept either way, so the
   // backend's per-agent cost join is unaffected.
   const scopeKind = subagentFile.skillName ? 'skill' : 'agent';
-  const scopeName = subagentFile.skillName ?? agentType;
+  const scopeName = subagentFile.skillName || agentType;
   for (const line of lines) {
     const parsed = parseUsageLine(line, scopeKind, scopeName, subagentFile.agentId, agentType);
     if (parsed) {
