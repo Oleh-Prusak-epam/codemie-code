@@ -95,17 +95,11 @@ type FixedCodemieEnvKey = Exclude<
   'OTEL_EXPORTER_OTLP_ENDPOINT' | 'OTEL_EXPORTER_OTLP_HEADERS'
 >;
 
-// Fixed values codemie writes for every key except the two daemon-derived
-// ones. Lets disconnect recognize "codemie's own value" without a live
-// daemon — disconnect never reads daemon state.
+// Fixed values for every non-daemon-derived key — lets disconnect recognize
+// "codemie's own value" without a live daemon.
 //
-// Intentionally a full (non-Partial) Record over FixedCodemieEnvKey, not
-// `Partial<Record<(typeof CODEMIE_ENV_KEYS)[number], string>>`: a Partial
-// plus an `as Record<...>` cast at the `codemieEnv` call site would compile
-// cleanly even if a future key were added to CODEMIE_ENV_KEYS without a
-// fixed value defined for it here — silently leaving that key's merge,
-// conflict-detection, and displaced-value restore all broken at runtime.
-// This way, the compiler itself rejects an incomplete key set.
+// A full Record, not Partial + `as` cast: a future key missing its value
+// here is now a compile error, not a silent runtime gap.
 const CODEMIE_ENV_FIXED_VALUES: Record<FixedCodemieEnvKey, string> = {
   CLAUDE_CODE_ENABLE_TELEMETRY: '1',
   CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: '1',
@@ -117,25 +111,14 @@ const CODEMIE_ENV_FIXED_VALUES: Record<FixedCodemieEnvKey, string> = {
 };
 
 /**
- * True if `value` is (still) codemie's own value for `key`, checked without
- * needing a live daemon: the two daemon-derived keys are matched by the fixed
- * suffix/prefix codemie always writes around the variable URL/token, the rest
- * by their fixed literal value.
+ * True if `value` is (still) codemie's own value for `key`, without a live
+ * daemon — matched by fixed suffix/prefix for the two daemon-derived keys,
+ * by fixed literal for the rest. `value` is `unknown` since settings are
+ * user-edited JSON.
  *
- * `value` is `unknown`, not `string`: settings are parsed from user-edited
- * JSON, so a key typed `string` in `ClaudeSettings.env` is not guaranteed to
- * actually hold one at runtime (e.g. a user nulling out a key in the file).
- *
- * `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_HEADERS` each
- * additionally require the OTHER to ALSO look like codemie's own (read from
- * `env`, the surrounding env block) — neither half is distinctive enough
- * alone: `Authorization=Bearer <token>` alone is the standard HTTP auth
- * scheme, and `/v1/analytics/otlp` alone is a plausible path on a user's own
- * unrelated OTLP collector that happens to follow a similar convention.
- * Pairing them sharply narrows false positives in both directions. `env`
- * must be a snapshot taken before any stripping mutates it — a caller
- * deleting one half earlier in the same pass must not make this check see
- * it as already gone.
+ * ENDPOINT and HEADERS each require the OTHER to also look like codemie's
+ * own (via `env`) — neither half alone is distinctive enough. `env` must
+ * be a pre-mutation snapshot or the pairing check breaks mid-pass.
  */
 function isCodemieOwnedEnvValue(
   key: (typeof CODEMIE_ENV_KEYS)[number],
@@ -163,18 +146,13 @@ function isCodemieOwnedEnvValue(
 }
 
 /**
- * Puts a value a `--force` connect once displaced into `backupEnv` back into
- * `baseEnv`, for any CODEMIE_ENV_KEYS key `baseEnv` doesn't already hold —
- * but only while `liveEnv` still carries codemie's OWN value for that key
- * right now. If the user touched it again since, the live value no longer
- * matches and this leaves `baseEnv` alone for that key.
+ * Puts a value a `--force` connect once displaced into `backupEnv` back
+ * into `baseEnv`, for any key `baseEnv` doesn't hold — only while `liveEnv`
+ * still carries codemie's OWN value right now (AC3: a user edit since then
+ * leaves `baseEnv` untouched).
  *
- * Shared by the connect-side backup refresh (carrying a displaced value
- * forward into the freshly rebuilt backup) and the disconnect-side restore
- * (putting a displaced value back into the live file being written).
- *
- * Returns `undefined` (never `{}`) when the result has no keys, so callers
- * can `delete` the settings' `env` key instead of leaving an empty object.
+ * Shared by connect-side refresh and disconnect-side restore. Returns
+ * `undefined` (never `{}`) when empty, so callers can `delete` the key.
  */
 function withDisplacedEnvValues(
   baseEnv: Record<string, string> | undefined,
@@ -199,22 +177,11 @@ function withDisplacedEnvValues(
 }
 
 /**
- * Hook-events counterpart to `withDisplacedEnvValues`. A `--force` connect can
- * only ever displace a hook event's value by DROPPING it outright — a
- * malformed (non-array) value the user owns, which codemie never merges with
- * (see the "Phase 1" comment in `writeClaudeCodeOtlpConfig`). A well-formed
- * array value is never dropped; codemie always merges into it at the command
- * level instead. So the only thing this ever restores is a malformed value
- * `backupHooks` holds for an event `baseHooks` doesn't — and only while
- * `liveHooks` for that event is STILL an array containing codemie's own
- * command right now. If the user has since replaced that event with their own
- * array, or removed it, the live value no longer carries our command and this
- * leaves `baseHooks` alone for that key — the same AC3 guarantee
- * `withDisplacedEnvValues` gives env values.
- *
- * Shared by the connect-side backup refresh (carrying a displaced value
- * forward into the freshly rebuilt backup) and the disconnect-side restore
- * (putting a displaced value back into the live file being written).
+ * Hook-events counterpart to `withDisplacedEnvValues` — same contract, but
+ * a hook event can only be displaced by DROPPING a malformed (non-array)
+ * value outright (a well-formed array is always merged into, never
+ * replaced). Restores it only while `liveHooks` still holds codemie's own
+ * command right now (same AC3 guarantee).
  */
 function withDisplacedHooks(
   baseHooks: Record<string, unknown> | undefined,
@@ -355,22 +322,14 @@ interface StripCodemieManagedContentResult {
 
 /**
  * Returns `existing` with every codemie-owned hook command and env key
- * removed, leaving only what the user owns. Used both to rebuild a missing
- * backup without re-copying our own writes (including the OTLP bearer
- * token), and to compute what disconnect should write back.
+ * removed, leaving only what the user owns. Rebuilds a missing backup
+ * without re-copying our own writes, and computes what disconnect writes back.
  *
- * Deliberately does NOT fall back to matching a live daemon's exact current
- * env values: the daemon's gateway key defaults to a fixed, non-secret,
- * user-visible string (`spawnDaemon`'s default in `daemon-manager.ts`) when
- * none is explicitly configured, so an exact-value match on
- * `OTEL_EXPORTER_OTLP_HEADERS` alone would be no stronger a signal than the
- * generic `Authorization=Bearer ` prefix `isCodemieOwnedEnvValue` already
- * refuses to trust by itself — it would silently reopen that exact false
- * positive. The structural pairing check alone is sufficient here: codemie
- * always writes `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_HEADERS`
- * together, and the ENDPOINT suffix it writes is invariant across daemon
- * restarts/port/key rotation, so there is no real scenario where ENDPOINT
- * fails the structural check for data codemie itself produced.
+ * No live-daemon exact-match fallback for env values: the daemon's default
+ * gateway key is a fixed, non-secret string, so an exact match alone could
+ * misclassify a collector reusing it. The structural pairing check in
+ * isCodemieOwnedEnvValue is rotation-invariant and already covers every
+ * case codemie itself can produce.
  */
 function stripCodemieManagedContent(existing: ClaudeSettings): StripCodemieManagedContentResult {
   let removedHookCommands = false;
@@ -408,13 +367,9 @@ function stripCodemieManagedContent(existing: ClaudeSettings): StripCodemieManag
       delete env[key];
     }
   }
-  // Unlike CODEMIE_ENV_KEYS this key's value isn't a fixed literal (it's a
-  // per-scope project list), so there is no exact-value check to gate on —
-  // but presence alone is still not ownership, the same principle as every
-  // CODEMIE_ENV_KEYS entry above. Gate on the value actually being a
-  // well-formed allowlist (what codemie itself always writes there): an
-  // unrelated env var that happens to share this exact, distinctive name
-  // but holds some other kind of string is left alone rather than destroyed.
+  // No fixed literal to compare (value is a per-scope list), so gate on it
+  // being a well-formed allowlist instead of presence alone — same
+  // ownership-by-value principle as CODEMIE_ENV_KEYS above.
   if (CODEMIE_ANALYTICS_PROJECT_FILTER_ENV in env && parseAllowlist(env[CODEMIE_ANALYTICS_PROJECT_FILTER_ENV]).kind !== 'invalid') {
     removedEnvKeys = true;
     delete env[CODEMIE_ANALYTICS_PROJECT_FILTER_ENV];
@@ -436,22 +391,14 @@ function stripCodemieManagedContent(existing: ClaudeSettings): StripCodemieManag
 }
 
 /**
- * Best-effort read of the backup file. Unlike `readSettingsFile`, never
- * throws: a missing, unreadable or corrupt backup just means nothing to
- * restore/carry forward from, not a connect/disconnect failure.
+ * Best-effort read of the backup file; never throws — missing, unreadable
+ * or corrupt just means nothing to restore from.
  *
- * Does NOT check the backup's age or which connect/disconnect "cycle" wrote
- * it — a value displaced by a `--force` connect long ago, with no
- * disconnect since, is still exactly as recoverable as one displaced a
- * moment ago; a time-based cutoff would silently drop it, trading one data-
- * loss bug for another. `withDisplacedEnvValues`/`withDisplacedHooks` already
- * gate every value this returns on the LIVE file currently holding codemie's
- * own value for that key — that is the staleness guard, not the backup's age.
+ * No age/cycle check: a long-displaced value is as recoverable as a recent
+ * one; withDisplacedEnvValues/withDisplacedHooks already gate on the LIVE
+ * file, which is the real staleness guard.
  *
- * Does sanitize `env`: a hand-edited or foreign-tool-written backup could
- * hold a non-string value, which would otherwise flow untyped into the live
- * settings file through `withDisplacedEnvValues`. Any such entries are
- * dropped rather than letting the whole backup be discarded.
+ * Sanitizes `env`: drops non-string values a hand-edited backup could hold.
  */
 async function readBackupSettings(backupPath: string): Promise<ClaudeSettings | null> {
   if (!existsSync(backupPath)) {
@@ -558,18 +505,11 @@ export async function writeClaudeCodeOtlpConfig(
     const alreadyManaged = Object.values(existingHooksBlock).some(
       (entries) => Array.isArray(entries) && entries.some(groupContainsCodemieCommand)
     ) || CODEMIE_ENV_KEYS.some((key) =>
-      // The same structural ownership check used everywhere else in this
-      // file (stripCodemieManagedContent, withDisplacedEnvValues) — not an
-      // exact match against the CURRENT live daemon state. An exact match
-      // would be strictly WEAKER for OTEL_EXPORTER_OTLP_HEADERS specifically:
-      // the daemon's gateway key defaults to a fixed, non-secret, user-visible
-      // string when none is configured (`spawnDaemon` in daemon-manager.ts),
-      // so an exact match alone could be fooled by an unrelated collector
-      // that happens to reuse that well-known default — exactly the false
-      // positive the ENDPOINT/HEADERS pairing check exists to rule out. The
-      // structural check is also rotation-invariant (the suffix/prefix it
-      // looks for survives a daemon restart with a new port/key), so it loses
-      // nothing an exact match would have caught.
+      // Structural ownership check (same as stripCodemieManagedContent), not an
+      // exact match against the live daemon state: the daemon's gateway key
+      // defaults to a fixed, non-secret string, so exact match alone could be
+      // fooled by an unrelated collector reusing it. Rotation-invariant too, so
+      // it loses nothing exact match would have caught.
       isCodemieOwnedEnvValue(key, existingEnv[key], existingEnv)
     );
     if (alreadyManaged) {
@@ -611,12 +551,9 @@ export async function writeClaudeCodeOtlpConfig(
         await writeAtomically(backupPathCandidate, JSON.stringify(stripped, null, 2) + '\n');
         backupPath = backupPathCandidate;
       } else if (existsSync(backupPathCandidate)) {
-        // Best-effort, same reasoning as the disconnect-side backup unlink:
-        // this is just dropping a now-unneeded stale backup, not the actual
-        // state change this connect is making. A failure here (e.g. EPERM
-        // from another process holding the file open) must not fail the
-        // whole connect — worst case, a stale backup lingers until the next
-        // connect/disconnect cycle removes or overwrites it.
+        // Best-effort (see disconnect's backup unlink below): a failure here
+        // (e.g. EPERM) must not fail the whole connect — just leaves a stale
+        // backup for the next cycle to clean up.
         try {
           await unlink(backupPathCandidate);
         } catch (error) {
@@ -789,12 +726,8 @@ export async function removeClaudeCodeOtlpConfig(
     await writeAtomically(settingsPath, JSON.stringify(stripped, null, 2) + '\n');
   }
   if (existsSync(backupPath)) {
-    // Best-effort: the important state change (settings.json above) has
-    // already landed by this point. A failure here (e.g. EPERM from another
-    // process holding the file open) must not surface as "disconnect
-    // failed" — that would mislead the user into thinking settings.json was
-    // never touched. Worst case, a stale backup lingers on disk; the next
-    // connect/disconnect cycle overwrites or removes it as usual.
+    // Best-effort: settings.json is already correctly updated by this point,
+    // so a failure here (e.g. EPERM) must not surface as "disconnect failed".
     try {
       await unlink(backupPath);
     } catch (error) {

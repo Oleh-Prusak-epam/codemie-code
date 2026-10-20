@@ -315,20 +315,10 @@ describe('claude-code-otlp connector', () => {
         const settingsPath = join(homeDir, '.claude', 'settings.json');
         await mkdir(join(homeDir, '.claude'), { recursive: true });
 
-        // Codemie's own env keys (both ENDPOINT and HEADERS — codemie always
-        // writes them as a pair, never one without the other) are present, but
-        // the hook group was stripped by some other process — no codemie hook
-        // command anywhere. No backup exists yet.
-        //
-        // Deliberately NOT testing HEADERS alone with no ENDPOINT: that state
-        // is not one codemie's own write path can ever produce, and recognizing
-        // it would require trusting an exact match on the daemon's gateway key
-        // alone — which defaults to a fixed, non-secret, user-visible string
-        // (`daemon-manager.ts`'s `spawnDaemon` default) when none is configured,
-        // making that match no stronger a signal than the generic
-        // `Authorization=Bearer ` prefix `isCodemieOwnedEnvValue` already
-        // refuses to trust by itself (see the "own unrelated Bearer-auth
-        // collector" regression test below).
+        // Codemie's own ENDPOINT+HEADERS pair present, hooks already stripped by
+        // another process. (HEADERS-without-ENDPOINT deliberately not tested
+        // here — codemie's write path never produces that state; see the "own
+        // unrelated Bearer-auth collector" test below for that guard.)
         await writeFile(
           settingsPath,
           JSON.stringify(
@@ -1014,14 +1004,10 @@ describe('claude-code-otlp connector', () => {
       });
 
       it('(finding #4, CRITICAL regression guard) a foreign Bearer header equal to the DEFAULT, non-secret gateway key, with no matching ENDPOINT, is never treated as codemie-owned', async () => {
-        // `spawnDaemon`'s default gatewayKey ('codemie-proxy' in daemon-manager.ts)
-        // is a fixed, non-secret, user-visible string whenever no key is
-        // explicitly configured — the normal `proxy start`/connect flow never
-        // supplies one. So matching HEADERS alone against "today's live value"
-        // would be no stronger a signal than the generic `Authorization=Bearer `
-        // prefix this file already refuses to trust by itself — codemie's
-        // ownership check must never let HEADERS prove itself without its
-        // sibling ENDPOINT also looking like codemie's own.
+        // spawnDaemon's default gatewayKey ('codemie-proxy') is a fixed, non-secret
+        // string when none is configured — matching HEADERS against it alone is no
+        // stronger than the generic Bearer prefix, so ownership must require the
+        // ENDPOINT pairing too.
         // Hooks already carry codemie's marker (so `alreadyManaged` is true via
         // hooks alone and the "already managed" strip-and-rebuild path — not
         // the unrelated "first connect" raw-copy path — is what's actually
