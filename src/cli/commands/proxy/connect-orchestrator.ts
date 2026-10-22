@@ -423,7 +423,7 @@ export async function ensureOtlpProxy(agentName: string): Promise<void> {
   // Hook invocations run as a background side effect on every tracked project;
   // an unconfigured baseUrl must skip cold start silently (not throw, unlike
   // connectTargets' interactive ConfigurationError) so it never fails the hook.
-  if (!config.baseUrl) {
+  if (!config.baseUrl?.trim()) {
     return;
   }
 

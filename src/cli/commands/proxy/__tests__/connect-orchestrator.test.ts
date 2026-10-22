@@ -595,6 +595,16 @@ describe('ensureOtlpProxy', () => {
     expect(spawnDaemon).not.toHaveBeenCalled();
   });
 
+  it('returns silently and does not spawn a daemon when baseUrl is whitespace-only', async () => {
+    const { readState, spawnDaemon } = await import('../daemon-manager.js');
+    vi.mocked(readState).mockResolvedValue(null);
+    await setupHappyMocks({ baseUrl: '   ' });
+
+    await expect(ensureOtlpProxy('claude-code-otlp')).resolves.toBeUndefined();
+
+    expect(spawnDaemon).not.toHaveBeenCalled();
+  });
+
   it('still cold-starts normally when baseUrl is present', async () => {
     const { readState, spawnDaemon, checkStatus } = await import('../daemon-manager.js');
     vi.mocked(readState).mockResolvedValue(null);
