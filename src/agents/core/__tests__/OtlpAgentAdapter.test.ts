@@ -157,7 +157,7 @@ describe('OtlpAgentAdapter.processOtlpEvent', () => {
     await expect(run()).resolves.toBeUndefined();
     expect(forwardToSpool).toHaveBeenCalledTimes(1);
     expect(ensureOtlpProxy.mock.invocationCallOrder[0]).toBeLessThan(forwardToSpool.mock.invocationCallOrder[0]);
-    expect(logger.error).toHaveBeenCalledWith(
+    expect(logger.debug).toHaveBeenCalledWith(
       expect.stringContaining('[fake] ensureOtlpProxy failed (non-blocking): Daemon failed to start within 5 seconds')
     );
   });
