@@ -152,10 +152,14 @@ describe('OtlpAgentAdapter.processOtlpEvent', () => {
   });
 
   it('swallows an ensureOtlpProxy failure, logs it, and still forwards the event', async () => {
+    const { logger } = await import('@/utils/logger.js');
     ensureOtlpProxy.mockRejectedValueOnce(new Error('Daemon failed to start within 5 seconds'));
     await expect(run()).resolves.toBeUndefined();
     expect(forwardToSpool).toHaveBeenCalledTimes(1);
     expect(ensureOtlpProxy.mock.invocationCallOrder[0]).toBeLessThan(forwardToSpool.mock.invocationCallOrder[0]);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('[fake] ensureOtlpProxy failed (non-blocking): Daemon failed to start within 5 seconds')
+    );
   });
 
   it('prints the decision and forwards nothing on the block path', async () => {
