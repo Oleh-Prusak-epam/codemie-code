@@ -104,7 +104,7 @@ export abstract class OtlpAgentAdapter<TInput = unknown, TBlockOutput = Record<s
       await ensureOtlpProxy(this.name);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      logger.error(`[${this.name}] ensureOtlpProxy failed (non-blocking): ${message}`);
+      logger.debug(`[${this.name}] ensureOtlpProxy failed (non-blocking): ${message}`);
     }
 
     const decision = await this.evaluate(hookInput);
