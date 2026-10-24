@@ -1,4 +1,4 @@
-import { countContentLines } from '../content-lines.js';
+import { countContentLines } from '@/utils/file-operations.js';
 
 /**
  * Transcript signals for `agent.session.summary`, plus `buildCompactionDoneEvent` for
@@ -8,8 +8,6 @@ import { countContentLines } from '../content-lines.js';
  * compaction boundaries, client versions and the session title. No I/O — the orchestrator reads
  * and parses the file once and hands the lines in.
  */
-
-import { countContentLines } from '@/utils/file-operations.js';
 
 /** The subset of a transcript line these extractors read; every field is optional. */
 export interface SignalLine {
