@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "flow": "sdlc-light",
+  "slug": "write-tool-overcounts-lines-trailing-newline",
+  "branch": "EPMCDME-16306_write-tool-line-count-overcount",
+  "phase": "main",
+  "started_at": "2026-10-23T00:00:00Z"
+}
