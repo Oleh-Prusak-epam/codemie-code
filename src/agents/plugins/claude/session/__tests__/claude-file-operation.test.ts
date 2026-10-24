@@ -66,4 +66,12 @@ describe('extractClaudeFileOperation', () => {
     });
     expect(op).toMatchObject({ linesAdded: 3 });
   });
+
+  it('reports linesAdded: 0 for an empty-content Write, not undefined', () => {
+    const op = extractClaudeFileOperation('Write', { file_path: '/repo/a.ts', content: '' }, {
+      filePath: '/repo/a.ts',
+      content: '',
+    });
+    expect(op).toMatchObject({ linesAdded: 0 });
+  });
 });

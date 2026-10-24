@@ -9,7 +9,7 @@ import { countContentLines } from '../content-lines.js';
  * and parses the file once and hands the lines in.
  */
 
-import { countContentLines } from '../../../../utils/file-operations.js';
+import { countContentLines } from '@/utils/file-operations.js';
 
 /** The subset of a transcript line these extractors read; every field is optional. */
 export interface SignalLine {

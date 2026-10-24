@@ -70,7 +70,7 @@ export function extractClaudeFileOperation(
 
   if (toolName === 'Write') {
     const content = res.content || res.file?.content || inp.content;
-    if (content) {
+    if (content !== undefined) {
       fileOp.linesAdded = countContentLines(content);
     }
   } else if (toolName === 'Edit' && Array.isArray(res.structuredPatch)) {
