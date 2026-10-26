@@ -64,7 +64,7 @@ export interface NativeLoaderDeps {
   /** Real paths of native logs already tracked by CodeMie (skip these to avoid double counting). */
   trackedLogPaths(): Set<string>;
   /** Discover native sessions for discovery-capable agents within the age window. */
-  discover(maxAgeDays: number): Promise<DiscoveredNative[]>;
+  discover(maxAgeDays?: number): Promise<DiscoveredNative[]>;
   /** Parse a native log into a unified session. */
   parse(agentName: string, filePath: string, sessionId: string): Promise<ParsedSession | null>;
   /** Resolve a path to its real (symlink-free) form for dedup comparison. */
@@ -601,13 +601,13 @@ export function synthesizeRawSession(
   });
 }
 
-/** Number of days from a filter's fromDate to now (for the discovery window), or a wide default. */
-function windowDays(filter?: AnalyticsFilter): number {
+/** Number of days from a filter's fromDate to now (for the discovery window), or undefined to let each adapter apply its own default. */
+function windowDays(filter?: AnalyticsFilter): number | undefined {
   if (filter?.fromDate) {
     const days = Math.ceil((Date.now() - filter.fromDate.getTime()) / 86_400_000);
     return Math.max(days + 1, 1);
   }
-  return 3650; // no lower bound requested → effectively "all"
+  return undefined; // no lower bound requested → let each adapter apply its own default
 }
 
 /** A discovered Pi transcript, parsed once, with the fork source its own header names. */
@@ -720,6 +720,12 @@ export async function loadNativeSessions(
 ): Promise<RawSessionData[]> {
   const tracked = deps.trackedLogPaths();
   const discovered = await deps.discover(windowDays(filter));
+  // A session-scoped request needs exactly one file's content, never the rest of the window —
+  // narrow here, before any parse (including the per-family passes below), so report generation
+  // for one session never pays the memory cost of the full discovery window.
+  const scoped = filter?.sessionId
+    ? discovered.filter(({ descriptor }) => descriptor.sessionId === filter.sessionId)
+    : discovered;
 
   // Parse each Codex session ONCE (cached for reuse below) and collect the child thread IDs each
   // parent references via spawn/wait collaboration events, so those sub-agent rollouts are not
@@ -727,7 +733,7 @@ export async function loadNativeSessions(
   // readCodexSubagentUsage in the cost enricher).
   const codexParsed = new Map<string, ParsedSession | null>();
   const codexChildThreads = new Set<string>();
-  for (const { agentName, descriptor } of discovered) {
+  for (const { agentName, descriptor } of scoped) {
     if (!isCodexFamilyAgent(agentName)) {
       continue;
     }
@@ -742,12 +748,12 @@ export async function loadNativeSessions(
 
   // Same shape for Pi, one level up: parse each transcript ONCE, then drop the `/fork`
   // continuations the adapter already folded into the transcript they grew out of.
-  const piTranscripts = await readPiTranscripts(discovered, deps);
+  const piTranscripts = await readPiTranscripts(scoped, deps);
   const piByRealPath = new Map(piTranscripts.map((t) => [t.realPath, t]));
   const piForkedChildren = foldPiForkFamilies(piTranscripts);
 
   const out: RawSessionData[] = [];
-  for (const { agentName, descriptor } of discovered) {
+  for (const { agentName, descriptor } of scoped) {
     if (isCodexFamilyAgent(agentName) && codexChildThreads.has(descriptor.sessionId)) {
       continue; // linked sub-agent rollout — already counted inside its parent
     }
