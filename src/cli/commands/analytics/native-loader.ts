@@ -601,13 +601,23 @@ export function synthesizeRawSession(
   });
 }
 
-/** Number of days from a filter's fromDate to now (for the discovery window), or undefined to let each adapter apply its own default. */
-function windowDays(filter?: AnalyticsFilter): number | undefined {
+/**
+ * Number of days from a filter's fromDate to now (for the discovery window).
+ *
+ * When fromDate is absent (no lower bound requested — whether or not sessionId is set), this
+ * stays at 3650 ("effectively all time") rather than deferring to each adapter's own ~30-day
+ * default (CR-003): a sessionId-scoped request still needs discover() to find the target file
+ * regardless of its age — the memory-safety fix is the parse-time `scoped` short-circuit in
+ * loadNativeSessions, not a narrower discovery window — and an unscoped/broad report must keep
+ * its pre-existing "all native history" default rather than silently losing anything older
+ * than ~30 days.
+ */
+function windowDays(filter?: AnalyticsFilter): number {
   if (filter?.fromDate) {
     const days = Math.ceil((Date.now() - filter.fromDate.getTime()) / 86_400_000);
     return Math.max(days + 1, 1);
   }
-  return undefined; // no lower bound requested → let each adapter apply its own default
+  return 3650; // no lower bound requested → effectively "all"
 }
 
 /** A discovered Pi transcript, parsed once, with the fork source its own header names. */

@@ -297,7 +297,7 @@ describe('loadNativeSessions — sessionId short-circuit', () => {
 });
 
 describe('loadNativeSessions — windowDays', () => {
-  it('passes undefined (not 3650) to discover when filter has no fromDate', async () => {
+  it('passes 3650 (effectively all time) to discover when filter has no fromDate, even when sessionId is set (CR-003: a sessionId-scoped request must still be able to discover a session older than any adapter default — the memory fix is the scoped parse short-circuit, not a narrower discovery window)', async () => {
     const discover = vi.fn(async () => []);
     const deps: NativeLoaderDeps = {
       trackedLogPaths: () => new Set<string>(),
@@ -309,7 +309,22 @@ describe('loadNativeSessions — windowDays', () => {
 
     await loadNativeSessions({ sessionId: 'target' }, deps);
 
-    expect(discover).toHaveBeenCalledWith(undefined);
+    expect(discover).toHaveBeenCalledWith(3650);
+  });
+
+  it('passes 3650 to discover for a broad (no filter) listing, preserving the pre-existing "effectively all history" default for unscoped analytics reports', async () => {
+    const discover = vi.fn(async () => []);
+    const deps: NativeLoaderDeps = {
+      trackedLogPaths: () => new Set<string>(),
+      discover,
+      parse: async () => null,
+      realPath: (p) => p,
+      hasOwnershipMarker: () => true,
+    };
+
+    await loadNativeSessions(undefined, deps);
+
+    expect(discover).toHaveBeenCalledWith(3650);
   });
 
   it('still derives a day count from filter.fromDate when it is set', async () => {
