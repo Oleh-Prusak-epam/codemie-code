@@ -235,7 +235,7 @@ describe('loadNativeSessions — sessionId short-circuit', () => {
     expect(results).toHaveLength(1);
   });
 
-  it('still parses a non-matching Pi descriptor (fork-fold correctness needs the full Pi family, even when scoped to a different session)', async () => {
+  it('never parses an unrelated Pi descriptor when the requested session is not Pi-family (CR-002: Pi volume must not OOM a Claude/Codex session report)', async () => {
     const parse = vi.fn(async (_agent: string, _filePath: string, sessionId: string) =>
       ({ sessionId, agentName: 'claude', metadata: {}, messages: [], metrics: { tools: {} } }) as never
     );
@@ -252,9 +252,9 @@ describe('loadNativeSessions — sessionId short-circuit', () => {
 
     const results = await loadNativeSessions({ sessionId: 'target' }, deps);
 
-    expect(parse).toHaveBeenCalledTimes(2);
-    expect(parse).toHaveBeenCalledWith('pi', '/logs/other-pi.jsonl', 'other-pi');
-    expect(results.map((s) => s.sessionId)).toEqual(['target']); // the non-matching Pi session is still excluded from output
+    expect(parse).toHaveBeenCalledTimes(1);
+    expect(parse).toHaveBeenCalledWith('claude', '/logs/target.jsonl', 'target');
+    expect(results.map((s) => s.sessionId)).toEqual(['target']);
   });
 
   it('returns an empty array and calls parse zero times when no descriptor matches filter.sessionId', async () => {

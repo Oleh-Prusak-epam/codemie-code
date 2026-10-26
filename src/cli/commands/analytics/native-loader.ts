@@ -748,10 +748,13 @@ export async function loadNativeSessions(
 
   // Same shape for Pi, one level up: parse each transcript ONCE, then drop the `/fork`
   // continuations the adapter already folded into the transcript they grew out of.
-  // Always fold over the FULL discovery window, not `scoped`: a fork's data only reaches its
-  // root through this fold, so scoping the fold input to one requested sessionId would silently
-  // drop a fork's content whenever the request targets its root.
-  const piTranscripts = await readPiTranscripts(discovered, deps);
+  // Fold over the FULL discovery window — never just `scoped` — so a fork's data still reaches
+  // its root when the request targets the root's sessionId. But only pay that cost when the
+  // request actually concerns a Pi session (or lists broadly, filter unset): parsing every
+  // discovered Pi transcript to serve a Claude/Codex-scoped report would reintroduce the same
+  // unbounded-parse OOM risk this ticket exists to fix, just shifted onto Pi volume.
+  const needsPiFamily = !filter?.sessionId || scoped.some(({ agentName }) => isPiAgent(agentName));
+  const piTranscripts = needsPiFamily ? await readPiTranscripts(discovered, deps) : [];
   const piByRealPath = new Map(piTranscripts.map((t) => [t.realPath, t]));
   const piForkedChildren = foldPiForkFamilies(piTranscripts);
 
