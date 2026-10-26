@@ -748,7 +748,10 @@ export async function loadNativeSessions(
 
   // Same shape for Pi, one level up: parse each transcript ONCE, then drop the `/fork`
   // continuations the adapter already folded into the transcript they grew out of.
-  const piTranscripts = await readPiTranscripts(scoped, deps);
+  // Always fold over the FULL discovery window, not `scoped`: a fork's data only reaches its
+  // root through this fold, so scoping the fold input to one requested sessionId would silently
+  // drop a fork's content whenever the request targets its root.
+  const piTranscripts = await readPiTranscripts(discovered, deps);
   const piByRealPath = new Map(piTranscripts.map((t) => [t.realPath, t]));
   const piForkedChildren = foldPiForkFamilies(piTranscripts);
 
@@ -757,8 +760,14 @@ export async function loadNativeSessions(
     if (isCodexFamilyAgent(agentName) && codexChildThreads.has(descriptor.sessionId)) {
       continue; // linked sub-agent rollout — already counted inside its parent
     }
-    if (isPiAgent(agentName) && piForkedChildren.has(deps.realPath(descriptor.filePath))) {
+    if (
+      !filter?.sessionId &&
+      isPiAgent(agentName) &&
+      piForkedChildren.has(deps.realPath(descriptor.filePath))
+    ) {
       continue; // forked continuation — already counted inside the transcript it grew out of
+      // (only when listing broadly; a request scoped to this exact sessionId wants ITS data,
+      // not to be silently absorbed into the root it would otherwise fold into)
     }
     if (tracked.has(deps.realPath(descriptor.filePath))) {
       continue; // already tracked by CodeMie — avoid double counting

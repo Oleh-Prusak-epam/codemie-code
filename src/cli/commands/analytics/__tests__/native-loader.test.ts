@@ -213,7 +213,7 @@ describe('loadNativeSessions', () => {
 });
 
 describe('loadNativeSessions — sessionId short-circuit', () => {
-  it('parses only the descriptor matching filter.sessionId, skipping all others', async () => {
+  it('parses only the descriptor matching filter.sessionId, skipping non-matching non-Pi descriptors', async () => {
     const parse = vi.fn(async (_agent: string, _filePath: string, sessionId: string) =>
       ({ sessionId, agentName: 'claude', metadata: {}, messages: [], metrics: { tools: {} } }) as never
     );
@@ -222,7 +222,6 @@ describe('loadNativeSessions — sessionId short-circuit', () => {
       discover: async () => [
         { agentName: 'claude', descriptor: { sessionId: 'target', filePath: '/logs/target.jsonl', createdAt: 1, agentName: 'claude' } },
         { agentName: 'codex', descriptor: { sessionId: 'other-codex', filePath: '/logs/other.jsonl', createdAt: 1, agentName: 'codex' } },
-        { agentName: 'pi', descriptor: { sessionId: 'other-pi', filePath: '/logs/other-pi.jsonl', createdAt: 1, agentName: 'pi' } },
       ],
       parse,
       realPath: (p) => p,
@@ -234,6 +233,28 @@ describe('loadNativeSessions — sessionId short-circuit', () => {
     expect(parse).toHaveBeenCalledTimes(1);
     expect(parse).toHaveBeenCalledWith('claude', '/logs/target.jsonl', 'target');
     expect(results).toHaveLength(1);
+  });
+
+  it('still parses a non-matching Pi descriptor (fork-fold correctness needs the full Pi family, even when scoped to a different session)', async () => {
+    const parse = vi.fn(async (_agent: string, _filePath: string, sessionId: string) =>
+      ({ sessionId, agentName: 'claude', metadata: {}, messages: [], metrics: { tools: {} } }) as never
+    );
+    const deps: NativeLoaderDeps = {
+      trackedLogPaths: () => new Set<string>(),
+      discover: async () => [
+        { agentName: 'claude', descriptor: { sessionId: 'target', filePath: '/logs/target.jsonl', createdAt: 1, agentName: 'claude' } },
+        { agentName: 'pi', descriptor: { sessionId: 'other-pi', filePath: '/logs/other-pi.jsonl', createdAt: 1, agentName: 'pi' } },
+      ],
+      parse,
+      realPath: (p) => p,
+      hasOwnershipMarker: () => true,
+    };
+
+    const results = await loadNativeSessions({ sessionId: 'target' }, deps);
+
+    expect(parse).toHaveBeenCalledTimes(2);
+    expect(parse).toHaveBeenCalledWith('pi', '/logs/other-pi.jsonl', 'other-pi');
+    expect(results.map((s) => s.sessionId)).toEqual(['target']); // the non-matching Pi session is still excluded from output
   });
 
   it('returns an empty array and calls parse zero times when no descriptor matches filter.sessionId', async () => {
