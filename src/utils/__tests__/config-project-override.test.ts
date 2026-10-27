@@ -392,21 +392,23 @@ describe('ConfigLoader - Project-Level Configuration', () => {
   });
 
   describe('saveProfile / initProjectConfig — workspace split', () => {
-    it('saveProfile routes workspace fields into the global scope workspace, not into profiles[name]', async () => {
+    it('saveProfile keeps identity fields on profiles[name], routes only non-identity fields into the global workspace', async () => {
       await ConfigLoader.saveProfile('p1', {
         provider: 'ai-run-sso',
         codeMieUrl: 'https://x',
-        codeMieProject: 'proj'
+        codeMieProject: 'proj',
+        claudeAutocompactPct: 85
       } as any);
 
       const content = await fs.readFile(GLOBAL_CONFIG_PATH, 'utf-8');
       const config: MultiProviderConfig = JSON.parse(content);
 
-      expect((config.profiles.p1 as any).codeMieUrl).toBeUndefined();
-      expect((config.profiles.p1 as any).codeMieProject).toBeUndefined();
+      expect((config.profiles.p1 as any).codeMieUrl).toBe('https://x');
+      expect((config.profiles.p1 as any).codeMieProject).toBe('proj');
       expect(config.profiles.p1.provider).toBe('ai-run-sso');
-      expect(config.workspace?.codeMieUrl).toBe('https://x');
-      expect(config.workspace?.codeMieProject).toBe('proj');
+      expect(config.workspace?.codeMieUrl).toBeUndefined();
+      expect(config.workspace?.codeMieProject).toBeUndefined();
+      expect(config.workspace?.claudeAutocompactPct).toBe(85);
     });
 
     it('initProjectConfig routes workspace fields into the local scope workspace, not into profiles[name]', async () => {
@@ -650,53 +652,95 @@ describe('ConfigLoader - workspace resolution and project-only composition', () 
       });
     });
 
-    it('switching the selected global profile does not drop workspace context', async () => {
-      await writeGlobal('codemie-sso', {
-        'codemie-sso': {
+    it('two global profiles targeting different CodeMie environments resolve their own identity independently (AC7)', async () => {
+      await writeGlobal('env-a', {
+        'env-a': {
           provider: 'ai-run-sso',
-          baseUrl: 'https://prod.example.com/code-assistant-api',
+          codeMieUrl: 'https://a.example.com',
+          codeMieProject: 'proj-a',
+          baseUrl: 'https://a.example.com/code-assistant-api',
           model: 'claude-sonnet-4-6',
-          name: 'codemie-sso'
+          name: 'env-a'
         },
-        anthropic: {
-          provider: 'anthropic-subscription',
-          baseUrl: 'https://api.anthropic.com',
+        'env-b': {
+          provider: 'ai-run-sso',
+          codeMieUrl: 'https://b.example.com',
+          codeMieProject: 'proj-b',
+          baseUrl: 'https://b.example.com/code-assistant-api',
           model: 'claude-sonnet-4-6',
-          name: 'anthropic'
+          name: 'env-b'
         }
       });
+      // A stale shared workspace value, as a pre-fix saveProfile() would have left
+      // behind. The fix must prefer each profile's own identity over this leftover.
       const globalRaw = JSON.parse(await fs.readFile(GLOBAL_CONFIG_PATH, 'utf-8'));
-      globalRaw.workspace = { codeMieProject: 'shared-proj' };
+      globalRaw.workspace = { codeMieUrl: 'https://stale-shared.example.com', codeMieProject: 'stale-shared-proj' };
       await fs.writeFile(GLOBAL_CONFIG_PATH, JSON.stringify(globalRaw, null, 2));
 
-      const ssoCfg = await ConfigLoader.load(path.join(TEST_DIR, 'project'), { name: 'codemie-sso' });
-      const anthropicCfg = await ConfigLoader.load(path.join(TEST_DIR, 'project'), { name: 'anthropic' });
+      const cfgA = await ConfigLoader.load(path.join(TEST_DIR, 'project'), { name: 'env-a' });
+      const cfgB = await ConfigLoader.load(path.join(TEST_DIR, 'project'), { name: 'env-b' });
 
-      expect(ssoCfg.codeMieProject).toBe('shared-proj');
-      expect(anthropicCfg.codeMieProject).toBe('shared-proj');
+      expect(cfgA.codeMieUrl).toBe('https://a.example.com');
+      expect(cfgA.codeMieProject).toBe('proj-a');
+      expect(cfgB.codeMieUrl).toBe('https://b.example.com');
+      expect(cfgB.codeMieProject).toBe('proj-b');
     });
 
-    it('loadWithSources reports a global-only workspace value with source "global", not "project"', async () => {
+    it('switching back to the first global profile restores its own identity (AC8)', async () => {
+      await writeGlobal('env-a', {
+        'env-a': {
+          provider: 'ai-run-sso',
+          codeMieUrl: 'https://a.example.com',
+          codeMieProject: 'proj-a',
+          baseUrl: 'https://a.example.com/code-assistant-api',
+          model: 'claude-sonnet-4-6',
+          name: 'env-a'
+        },
+        'env-b': {
+          provider: 'ai-run-sso',
+          codeMieUrl: 'https://b.example.com',
+          codeMieProject: 'proj-b',
+          baseUrl: 'https://b.example.com/code-assistant-api',
+          model: 'claude-sonnet-4-6',
+          name: 'env-b'
+        }
+      });
+      // A stale shared workspace value left over from switching profiles pre-fix.
+      const globalRaw = JSON.parse(await fs.readFile(GLOBAL_CONFIG_PATH, 'utf-8'));
+      globalRaw.workspace = { codeMieUrl: 'https://b.example.com', codeMieProject: 'proj-b' };
+      await fs.writeFile(GLOBAL_CONFIG_PATH, JSON.stringify(globalRaw, null, 2));
+
+      await ConfigLoader.load(path.join(TEST_DIR, 'project'), { name: 'env-a' });
+      await ConfigLoader.load(path.join(TEST_DIR, 'project'), { name: 'env-b' });
+      const backToA = await ConfigLoader.load(path.join(TEST_DIR, 'project'), { name: 'env-a' });
+
+      expect(backToA.codeMieUrl).toBe('https://a.example.com');
+      expect(backToA.codeMieProject).toBe('proj-a');
+    });
+
+    it('loadWithSources reports a global profile\'s own identity with source "global", not "project"', async () => {
       await writeGlobal('preview', {
         preview: {
           provider: 'ai-run-sso',
+          codeMieUrl: 'https://preview-own.example.com',
           baseUrl: 'https://preview.example.com/code-assistant-api',
           model: 'claude-sonnet-4-6',
           name: 'preview'
         }
       });
+      // A stale shared workspace value that must NOT override the profile's own identity.
       const globalRaw = JSON.parse(await fs.readFile(GLOBAL_CONFIG_PATH, 'utf-8'));
-      globalRaw.workspace = { codeMieUrl: 'https://global-workspace.example.com' };
+      globalRaw.workspace = { codeMieUrl: 'https://stale-shared.example.com' };
       await fs.writeFile(GLOBAL_CONFIG_PATH, JSON.stringify(globalRaw, null, 2));
 
-      // No local .codemie/ config written — the resolved workspace can only have
+      // No local .codemie/ config written — the resolved identity can only have
       // come from the global scope, so --show-sources must label it 'global'.
       const { config: merged, sources } = await ConfigLoader.loadWithSources(
         path.join(TEST_DIR, 'project'),
         { name: 'preview' }
       );
 
-      expect(merged.codeMieUrl).toBe('https://global-workspace.example.com');
+      expect(merged.codeMieUrl).toBe('https://preview-own.example.com');
       expect(sources['codeMieUrl']?.source).toBe('global');
     });
 

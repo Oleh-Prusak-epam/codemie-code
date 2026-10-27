@@ -223,9 +223,12 @@ export class ConfigLoader {
   /**
    * Resolve the workspace for the profile in use. Tooling-context fields follow
    * resolveWorkspace(). CodeMie identity fields (codeMieUrl, codeMieProject,
-   * codeMieIntegration) come from the scope the profile lives in: a local profile
-   * takes them from resolveWorkspace(), a global profile only from the global
-   * scope's workspace, so a repo's workspace never retargets global profiles.
+   * codeMieIntegration) are NOT part of this result for a global profile — they
+   * live directly on that profile's own ProviderProfile object (EPMCDME-15411)
+   * and are already merged into the caller's config earlier in load()/
+   * loadWithSources() via loadGlobalConfigProfile(). Returning them here too
+   * would let the shared global workspace's (possibly stale, pre-migration)
+   * identity clobber the profile's own correct values.
    *
    * @param workingDir - Directory whose local config is considered
    * @param isLocalProfile - Whether the profile in use is defined in the local config
@@ -236,13 +239,9 @@ export class ConfigLoader {
       return workspace;
     }
 
-    const globalWorkspace: WorkspaceConfig = (await this.loadMultiProviderConfig()).workspace ?? {};
     const result: Record<string, unknown> = { ...workspace };
     for (const key of this.IDENTITY_KEYS) {
       delete result[key];
-      if (globalWorkspace[key] !== undefined) {
-        result[key] = globalWorkspace[key];
-      }
     }
     return result as WorkspaceConfig;
   }
@@ -624,17 +623,37 @@ export class ConfigLoader {
   ];
 
   /**
+   * Non-identity WorkspaceConfig keys. Unlike IDENTITY_KEYS, saveProfile() (a
+   * global-scope-only method) routes these into the shared global workspace —
+   * identity fields stay on the profile itself so each global profile resolves
+   * its own CodeMie identity independently (EPMCDME-15411).
+   */
+  private static readonly NON_IDENTITY_WORKSPACE_KEYS: (keyof WorkspaceConfig)[] = [
+    'hooks',
+    'plugins',
+    'assistants',
+    'skillsSearchUrl',
+    'claudeAutocompactPct',
+    'metrics'
+  ];
+
+  /**
    * Partition a profile-shaped input into its provider-identity half and its
    * workspace half, so callers that persist a profile can route each half to
    * where it belongs (profiles[name] vs. the scope's workspace).
+   *
+   * @param keys - Which WorkspaceConfig keys to split out; defaults to all of
+   *   WORKSPACE_KEYS (identity + non-identity), as initProjectConfig() needs for
+   *   local scope. saveProfile() passes NON_IDENTITY_WORKSPACE_KEYS instead.
    */
   private static splitProfileAndWorkspace(
-    input: Partial<CodeMieConfigOptions>
+    input: Partial<CodeMieConfigOptions>,
+    keys: (keyof WorkspaceConfig)[] = this.WORKSPACE_KEYS
   ): { profile: Partial<ProviderProfile>; workspace: Partial<WorkspaceConfig> } {
     const profile: Partial<ProviderProfile> = { ...(input as any) };
     const workspace: Partial<WorkspaceConfig> = {};
 
-    for (const key of this.WORKSPACE_KEYS) {
+    for (const key of keys) {
       if ((input as any)[key] !== undefined) {
         (workspace as any)[key] = (input as any)[key];
         delete (profile as any)[key];
@@ -653,7 +672,13 @@ export class ConfigLoader {
     // Strip top-level-only fields that must not live inside a profile
     const { codemieSkills: _skills, codemieAssistants: _assistants, ...cleanProfile } = profile as any;
 
-    const { profile: profileFields, workspace: workspaceFields } = this.splitProfileAndWorkspace(cleanProfile);
+    // Identity fields (codeMieUrl/codeMieProject/codeMieIntegration) stay in
+    // profileFields — only non-identity workspace fields route to the shared
+    // global workspace (EPMCDME-15411).
+    const { profile: profileFields, workspace: workspaceFields } = this.splitProfileAndWorkspace(
+      cleanProfile,
+      this.NON_IDENTITY_WORKSPACE_KEYS
+    );
 
     (profileFields as any).name = profileName;
     config.profiles[profileName] = profileFields as ProviderProfile;
