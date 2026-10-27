@@ -680,6 +680,41 @@ async function gitBranch(cwd) {
   }
 }
 
+function isCodeMiePlatformProvider(provider) {
+  return provider === 'ai-run-sso' || provider === 'bearer-auth';
+}
+
+function originOf(url) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return undefined;
+  }
+}
+
+// Mirrors canUseSharedIdentity() in src/utils/config.ts exactly. Duplicated here (not imported)
+// because this file is deployed standalone — see the header comment on bundling. Refuses the
+// pre-migration-008 shared-identity fallback only on positive evidence the shared value belongs
+// to a *different* profile: the profile talks to the CodeMie platform directly, its baseUrl
+// origin differs from the shared codeMieUrl's, AND another platform profile's baseUrl is on
+// exactly that shared origin. A vendor-subscription profile or a lone split-host ai-run-sso
+// profile (no sibling evidence) is always allowed.
+function canUseSharedIdentity(profile, siblingProfiles: Record<string, any>, ownName, sharedCodeMieUrl) {
+  if (!isCodeMiePlatformProvider(profile?.provider)) return true;
+  if (!sharedCodeMieUrl || !profile?.baseUrl) return true;
+
+  const sharedOrigin = originOf(sharedCodeMieUrl);
+  const ownOrigin = originOf(profile.baseUrl);
+  if (!sharedOrigin || !ownOrigin || sharedOrigin === ownOrigin) return true;
+
+  const claimedBySibling = Object.entries(siblingProfiles ?? {}).some(([name, sibling]: [string, any]) => {
+    if (name === ownName) return false;
+    if (!isCodeMiePlatformProvider(sibling?.provider) || !sibling?.baseUrl) return false;
+    return originOf(sibling.baseUrl) === sharedOrigin;
+  });
+  return !claimedBySibling;
+}
+
 // --- Budget resolution (network/filesystem; dependencies injectable for tests) ---
 
 export async function resolveBudget({
@@ -730,20 +765,12 @@ export async function resolveBudget({
   // a chance to migrate it — only that launcher runs pending migrations) has none of
   // its own yet, so fall back to the shared workspace value — migration 008 always
   // strips it once it runs, so a non-empty value here can only mean "not yet
-  // migrated", never a post-migration leftover. Guarded by origin, same as the
-  // migration itself: a mismatch means the shared value belongs to a different
-  // profile's backend and must not be resurrected here.
+  // migrated", never a post-migration leftover. Guarded by canUseSharedIdentity(),
+  // same as the migration and the read-time fallback in src/utils/config.ts.
   let codeMieUrl = profile?.codeMieUrl;
-  if (!codeMieUrl && config.workspace?.codeMieUrl && baseUrl) {
-    let sameOriginAsShared = false;
-    try {
-      sameOriginAsShared = new URL(baseUrl).origin === new URL(config.workspace.codeMieUrl).origin;
-    } catch {
-      sameOriginAsShared = false;
-    }
-    if (sameOriginAsShared) {
-      codeMieUrl = config.workspace.codeMieUrl;
-    }
+  if (!codeMieUrl && config.workspace?.codeMieUrl
+    && canUseSharedIdentity(profile, config.profiles, profileName, config.workspace.codeMieUrl)) {
+    codeMieUrl = config.workspace.codeMieUrl;
   }
   const userEmail = config.userEmail;
   if (!profile || !codeMieUrl || !baseUrl || !userEmail) {

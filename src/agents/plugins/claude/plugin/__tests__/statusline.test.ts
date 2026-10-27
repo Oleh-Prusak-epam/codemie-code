@@ -365,6 +365,38 @@ describe('resolveBudget', () => {
     expect(result).toEqual({ budget: null, budgetError: null });
   });
 
+  it('falls back to the shared workspace.codeMieUrl for a vendor-subscription profile whose baseUrl is never the CodeMie backend', async () => {
+    // anthropic-subscription's baseUrl is always the vendor API, never codeMieUrl's origin by
+    // design — the origin guard must not apply to it at all (mirrors canUseSharedIdentity()).
+    const readFile = readFileFor({
+      activeProfile: 'default',
+      userEmail: 'me@x.com',
+      workspace: { codeMieUrl: 'https://codemie.lab.epam.com' },
+      profiles: { default: { provider: 'anthropic-subscription', baseUrl: 'https://api.anthropic.com' } },
+    });
+    const getAuthHeadersImpl = vi.fn().mockResolvedValue({ cookie: 'a=b' });
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 500 });
+    const result = await resolveBudget({ readFile, writeFile: vi.fn(), fetchImpl, getAuthHeadersImpl });
+    // codeMieUrl resolved (so it got past the early skip); the separate send-safety same-origin
+    // gate (baseUrl vs codeMieUrl) then still blocks the actual fetch for this vendor profile.
+    expect(result).toEqual({ budget: null, budgetError: null });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('does not fall back to the shared workspace.codeMieUrl when another ai-run-sso sibling profile is provably pinned to it', async () => {
+    const readFile = readFileFor({
+      activeProfile: 'medecision',
+      userEmail: 'me@x.com',
+      workspace: { codeMieUrl: 'https://codemie.lab.epam.com' },
+      profiles: {
+        medecision: { provider: 'ai-run-sso', baseUrl: 'https://codemie.gcp.medecision.com/code-assistant-api' },
+        epam: { provider: 'ai-run-sso', baseUrl: 'https://codemie.lab.epam.com/code-assistant-api' },
+      },
+    });
+    const result = await resolveBudget({ readFile, writeFile: vi.fn(), fetchImpl: vi.fn(), getAuthHeadersImpl: vi.fn() });
+    expect(result).toEqual({ budget: null, budgetError: null });
+  });
+
   it('returns a "reauthenticate" error when no auth headers are available', async () => {
     const readFile = readFileFor({
         activeProfile: 'default',

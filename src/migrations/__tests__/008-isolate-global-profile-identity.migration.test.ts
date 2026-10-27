@@ -97,6 +97,68 @@ describe('IsolateGlobalProfileIdentityMigration', () => {
     expect((result.profiles['env-b'] as any).codeMieProject).toBe('shared-proj');
   });
 
+  it('clones the shared identity onto a vendor-subscription profile regardless of baseUrl origin', () => {
+    const config: any = {
+      version: 2,
+      activeProfile: 'anthropic-sub',
+      profiles: {
+        'anthropic-sub': { provider: 'anthropic-subscription', baseUrl: 'https://api.anthropic.com' }
+      },
+      workspace: { codeMieUrl: 'https://codemie.lab.epam.com', codeMieProject: 'epm-cdme' }
+    };
+
+    const result = migrate(config);
+
+    expect((result.profiles['anthropic-sub'] as any).codeMieUrl).toBe('https://codemie.lab.epam.com');
+    expect((result.profiles['anthropic-sub'] as any).codeMieProject).toBe('epm-cdme');
+    expect(result.workspace?.codeMieUrl).toBeUndefined();
+  });
+
+  it('clones the shared identity onto a lone ai-run-sso profile with a split API host, when no sibling claims the shared origin', () => {
+    const config: any = {
+      version: 2,
+      activeProfile: 'split-host',
+      profiles: {
+        'split-host': { provider: 'ai-run-sso', baseUrl: 'https://api.split-host.example.com/code-assistant-api' }
+      },
+      workspace: { codeMieUrl: 'https://split-host.example.com', codeMieProject: 'split-host-proj' }
+    };
+
+    const result = migrate(config);
+
+    expect((result.profiles['split-host'] as any).codeMieUrl).toBe('https://split-host.example.com');
+    expect((result.profiles['split-host'] as any).codeMieProject).toBe('split-host-proj');
+    expect(result.workspace?.codeMieUrl).toBeUndefined();
+  });
+
+  it('keeps workspace when every profile already has its own identity or every candidate was refused, so nobody loses data nobody claimed', () => {
+    const config: any = {
+      version: 2,
+      activeProfile: 'medecision',
+      profiles: {
+        // Only profile, mismatched origin, no sibling evidence either way —
+        // canUseSharedIdentity() would actually allow this one (no positive
+        // conflict evidence), so pin a genuine refusal case: a sibling DOES
+        // claim the shared origin, so medecision is refused, and env-b already
+        // has its own full identity so it changes nothing either.
+        'medecision': { provider: 'ai-run-sso', baseUrl: 'https://codemie.gcp.medecision.com/code-assistant-api' },
+        'env-b': {
+          provider: 'ai-run-sso',
+          baseUrl: 'https://shared.example.com/code-assistant-api',
+          codeMieUrl: 'https://shared.example.com',
+          codeMieProject: 'shared-proj'
+        }
+      },
+      workspace: { codeMieUrl: 'https://shared.example.com', codeMieProject: 'shared-proj' }
+    };
+
+    const result = migrate(config);
+
+    expect((result.profiles['medecision'] as any).codeMieUrl).toBeUndefined();
+    expect(result.workspace?.codeMieUrl).toBe('https://shared.example.com');
+    expect(result.workspace?.codeMieProject).toBe('shared-proj');
+  });
+
   it('is a no-op when workspace has no identity fields', () => {
     const config: any = {
       version: 2,

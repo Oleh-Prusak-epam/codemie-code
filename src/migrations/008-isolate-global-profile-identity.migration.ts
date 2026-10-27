@@ -1,6 +1,6 @@
 import type { Migration, MigrationResult } from './types.js';
 import { MigrationRegistry } from './registry.js';
-import { ConfigLoader } from '../utils/config.js';
+import { ConfigLoader, canUseSharedIdentity } from '../utils/config.js';
 import type { MultiProviderConfig, ProviderProfile, WorkspaceConfig } from '../env/types.js';
 
 /**
@@ -12,29 +12,36 @@ function hasIdentity(source: WorkspaceConfig | ProviderProfile): boolean {
   return source.codeMieUrl !== undefined || source.codeMieProject !== undefined || source.codeMieIntegration !== undefined;
 }
 
-// A profile's own baseUrl and the shared codeMieUrl should point at the same
-// backend (SSO's buildConfig derives baseUrl from codeMieUrl). A mismatch
-// means the shared value was last saved for a different profile/environment —
-// the pre-fix bug's own symptom — so copying it here would pin the wrong
-// project/integration onto this profile's analytics attribution.
-function originsMatch(baseUrl?: string, codeMieUrl?: string): boolean {
-  if (!baseUrl || !codeMieUrl) return true;
-  try {
-    return new URL(baseUrl).origin === new URL(codeMieUrl).origin;
-  } catch {
-    return true;
-  }
-}
-
 // Per-field gap-fill, not all-or-nothing: a profile with its own
 // codeMieProject but no codeMieUrl still gets codeMieUrl filled in.
-function withIdentityFrom(profile: ProviderProfile, source: WorkspaceConfig): ProviderProfile {
-  if (!originsMatch(profile.baseUrl, source.codeMieUrl)) return profile;
+// canUseSharedIdentity() (shared with the read-time fallback in config.ts —
+// see its own doc comment) refuses only on positive evidence the shared value
+// belongs to a different profile/environment; a vendor-subscription profile or
+// a lone split-host ai-run-sso profile is always allowed.
+function withIdentityFrom(
+  profile: ProviderProfile,
+  source: WorkspaceConfig,
+  allProfiles: Record<string, ProviderProfile>,
+  ownName: string
+): { profile: ProviderProfile; changed: boolean } {
+  if (!canUseSharedIdentity(profile, allProfiles, ownName, source.codeMieUrl)) {
+    return { profile, changed: false };
+  }
   const cloned: ProviderProfile = { ...profile };
-  if (cloned.codeMieUrl === undefined && source.codeMieUrl !== undefined) cloned.codeMieUrl = source.codeMieUrl;
-  if (cloned.codeMieProject === undefined && source.codeMieProject !== undefined) cloned.codeMieProject = source.codeMieProject;
-  if (cloned.codeMieIntegration === undefined && source.codeMieIntegration !== undefined) cloned.codeMieIntegration = source.codeMieIntegration;
-  return cloned;
+  let changed = false;
+  if (cloned.codeMieUrl === undefined && source.codeMieUrl !== undefined) {
+    cloned.codeMieUrl = source.codeMieUrl;
+    changed = true;
+  }
+  if (cloned.codeMieProject === undefined && source.codeMieProject !== undefined) {
+    cloned.codeMieProject = source.codeMieProject;
+    changed = true;
+  }
+  if (cloned.codeMieIntegration === undefined && source.codeMieIntegration !== undefined) {
+    cloned.codeMieIntegration = source.codeMieIntegration;
+    changed = true;
+  }
+  return { profile: cloned, changed };
 }
 
 function withoutIdentity(workspace: WorkspaceConfig): WorkspaceConfig {
@@ -66,10 +73,19 @@ class IsolateGlobalProfileIdentityMigration implements Migration {
     const sharedWorkspace: WorkspaceConfig = config.workspace ?? {};
     if (!hasIdentity(sharedWorkspace)) return config;
 
+    const sourceProfiles = config.profiles ?? {};
     const profiles: Record<string, ProviderProfile> = {};
-    for (const [name, profile] of Object.entries(config.profiles ?? {})) {
-      profiles[name] = withIdentityFrom(profile, sharedWorkspace);
+    let anyChanged = false;
+    for (const [name, profile] of Object.entries(sourceProfiles)) {
+      const result = withIdentityFrom(profile, sharedWorkspace, sourceProfiles, name);
+      profiles[name] = result.profile;
+      anyChanged = anyChanged || result.changed;
     }
+
+    // Nobody actually received the shared identity (every profile already had
+    // its own, or every CodeMie-platform profile was refused) — keep workspace
+    // rather than deleting data nobody got a chance to claim.
+    if (!anyChanged) return config;
 
     return { ...config, profiles, workspace: withoutIdentity(sharedWorkspace) };
   }

@@ -815,28 +815,138 @@ describe('ConfigLoader - workspace resolution and project-only composition', () 
       expect(cfg.codeMieProject).toBe('work-proj');
     });
 
-    it('does not fall back to the shared workspace identity before migration 008 when it belongs to a different environment', async () => {
+    it('does not fall back to the shared workspace identity before migration 008 when another CodeMie-platform profile is provably pinned to it', async () => {
       // Pre-008 shape, but the shared workspace was last saved for a *different*
-      // profile's backend (origin mismatch) — exactly the pre-fix bug's own
-      // symptom. Falling back here would pin another environment's project
-      // onto this profile, same as migration 008's own originsMatch() guards
-      // against; the runtime fallback must apply the same guard.
+      // profile's backend — exactly the pre-fix bug's own symptom. 'epam' proves
+      // the shared value belongs to it (same origin), so 'medecision' (a
+      // different origin) must not inherit it.
       await writeGlobal('medecision', {
         medecision: {
           provider: 'ai-run-sso',
           baseUrl: 'https://codemie.gcp.medecision.com/code-assistant-api',
           model: 'claude-sonnet-4-6',
           name: 'medecision'
+        },
+        epam: {
+          provider: 'ai-run-sso',
+          baseUrl: 'https://codemie.lab.epam.com/code-assistant-api',
+          model: 'claude-sonnet-4-6',
+          name: 'epam'
         }
       });
       const globalRaw = JSON.parse(await fs.readFile(GLOBAL_CONFIG_PATH, 'utf-8'));
-      globalRaw.workspace = { codeMieUrl: 'https://codemie.lab.epam.com', codeMieProject: 'other-env-proj' };
+      globalRaw.workspace = { codeMieUrl: 'https://codemie.lab.epam.com', codeMieProject: 'epam-proj' };
       await fs.writeFile(GLOBAL_CONFIG_PATH, JSON.stringify(globalRaw, null, 2));
 
       const cfg = await ConfigLoader.load(path.join(TEST_DIR, 'project'), { name: 'medecision' });
 
       expect(cfg.codeMieUrl).toBeUndefined();
       expect(cfg.codeMieProject).toBeUndefined();
+    });
+
+    it('falls back to the shared workspace identity for a lone CodeMie-platform profile whose baseUrl origin differs, when no sibling profile is provably pinned to it (split-host SSO)', async () => {
+      // ai-run-sso can have a split host: baseUrl's origin need not match
+      // codeMieUrl's origin by design (see sso.auth.ts's VITE_API_URL
+      // resolution). With no other profile claiming the shared origin, there
+      // is no positive evidence it belongs to someone else, so it must still
+      // resolve rather than silently losing identity.
+      await writeGlobal('split-host', {
+        'split-host': {
+          provider: 'ai-run-sso',
+          baseUrl: 'https://api.split-host.example.com/code-assistant-api',
+          model: 'claude-sonnet-4-6',
+          name: 'split-host'
+        }
+      });
+      const globalRaw = JSON.parse(await fs.readFile(GLOBAL_CONFIG_PATH, 'utf-8'));
+      globalRaw.workspace = { codeMieUrl: 'https://split-host.example.com', codeMieProject: 'split-host-proj' };
+      await fs.writeFile(GLOBAL_CONFIG_PATH, JSON.stringify(globalRaw, null, 2));
+
+      const cfg = await ConfigLoader.load(path.join(TEST_DIR, 'project'), { name: 'split-host' });
+
+      expect(cfg.codeMieUrl).toBe('https://split-host.example.com');
+      expect(cfg.codeMieProject).toBe('split-host-proj');
+    });
+
+    it('falls back to the shared workspace identity for a vendor-subscription profile regardless of baseUrl origin', async () => {
+      // anthropic-subscription/moonshot-subscription's baseUrl is always the
+      // vendor's API, never the CodeMie backend — origin never matches
+      // codeMieUrl by design, so the origin guard must not apply to them at all.
+      await writeGlobal('anthropic-sub', {
+        'anthropic-sub': {
+          provider: 'anthropic-subscription',
+          baseUrl: 'https://api.anthropic.com',
+          apiKey: '',
+          model: 'claude-sonnet-4-6',
+          authMethod: 'manual',
+          name: 'anthropic-sub'
+        }
+      });
+      const globalRaw = JSON.parse(await fs.readFile(GLOBAL_CONFIG_PATH, 'utf-8'));
+      globalRaw.workspace = { codeMieUrl: 'https://codemie.lab.epam.com', codeMieProject: 'epm-cdme' };
+      await fs.writeFile(GLOBAL_CONFIG_PATH, JSON.stringify(globalRaw, null, 2));
+
+      const cfg = await ConfigLoader.load(path.join(TEST_DIR, 'project'), { name: 'anthropic-sub' });
+
+      expect(cfg.codeMieUrl).toBe('https://codemie.lab.epam.com');
+      expect(cfg.codeMieProject).toBe('epm-cdme');
+    });
+
+    it('the pre-migration-008 fallback uses the global shared workspace, never a repo-local workspace meant for a different profile', async () => {
+      // A repo's local .codemie/ workspace is an unrelated project-context
+      // overlay (its own compatibility rules live elsewhere); it must never
+      // supply the pre-008 identity fallback for a selected GLOBAL profile.
+      await writeGlobal('work', {
+        work: {
+          provider: 'ai-run-sso',
+          baseUrl: 'https://global.example.com/code-assistant-api',
+          model: 'claude-sonnet-4-6',
+          name: 'work'
+        }
+      });
+      const globalRaw = JSON.parse(await fs.readFile(GLOBAL_CONFIG_PATH, 'utf-8'));
+      globalRaw.workspace = { codeMieUrl: 'https://global.example.com', codeMieProject: 'global-proj' };
+      await fs.writeFile(GLOBAL_CONFIG_PATH, JSON.stringify(globalRaw, null, 2));
+
+      const localDir = path.join(TEST_DIR, 'project', '.codemie');
+      await fs.mkdir(localDir, { recursive: true });
+      await fs.writeFile(path.join(localDir, 'codemie-cli.config.json'), JSON.stringify({
+        version: 2,
+        activeProfile: 'none',
+        profiles: {},
+        workspace: { codeMieUrl: 'https://global.example.com', codeMieProject: 'repo-proj' }
+      }, null, 2));
+
+      const cfg = await ConfigLoader.load(path.join(TEST_DIR, 'project'), { name: 'work' });
+
+      expect(cfg.codeMieProject).toBe('global-proj');
+    });
+
+    it('resolveProfileWorkspace() never substitutes a stale shared value for a profile that already owns its own identity, even when the caller omits profileIdentity', async () => {
+      // listProfiles() (profile/index.ts) calls resolveProfileWorkspace(workingDir, false, {}, name)
+      // with an EMPTY profileIdentity for every row — it relies on the function itself to notice
+      // the named profile already has its own identity, not on the caller re-deriving it. A stale
+      // leftover shared value with no sibling claiming its origin is otherwise still "allowed" by
+      // canUseSharedIdentity (no positive conflict evidence), so without this guard it would
+      // silently clobber a profile's own already-correct identity.
+      await writeGlobal('pa', {
+        pa: {
+          provider: 'ai-run-sso',
+          baseUrl: 'https://a.example.com/code-assistant-api',
+          codeMieUrl: 'https://a.example.com',
+          codeMieProject: 'proj-a',
+          model: 'claude-sonnet-4-6',
+          name: 'pa'
+        }
+      });
+      const globalRaw = JSON.parse(await fs.readFile(GLOBAL_CONFIG_PATH, 'utf-8'));
+      globalRaw.workspace = { codeMieUrl: 'https://stale.example.com', codeMieProject: 'stale-proj' };
+      await fs.writeFile(GLOBAL_CONFIG_PATH, JSON.stringify(globalRaw, null, 2));
+
+      const ws = await ConfigLoader.resolveProfileWorkspace(path.join(TEST_DIR, 'project'), false, {}, 'pa');
+
+      expect(ws.codeMieUrl).toBeUndefined();
+      expect(ws.codeMieProject).toBeUndefined();
     });
 
     it('a global profile\'s own identity always wins over a stale shared workspace value, migrated or not', async () => {

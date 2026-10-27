@@ -20,24 +20,57 @@ import {
 import { ProviderRegistry } from '../providers/index.js';
 import { getCodemieHome, getCodemiePath } from './paths.js';
 import { ConfigurationError } from './errors.js';
+import { isCodeMiePlatformProvider } from '../providers/core/codemie-auth-helpers.js';
 
 // Re-export for backward compatibility
 export type { CodeMieConfigOptions, CodeMieIntegrationInfo, ConfigWithSource, ConfigWithSources };
 
 export { StorageScope };
 
-// A profile's own baseUrl and a shared codeMieUrl should point at the same backend
-// (SSO's buildConfig derives baseUrl from codeMieUrl). A mismatch means the shared
-// value was last saved for a different profile/environment — exactly the pre-fix
-// bug's own symptom — so falling back to it would pin the wrong project/integration
-// onto this profile's analytics attribution. Mirrors the same guard in migration 008.
-function originsMatch(baseUrl?: string, codeMieUrl?: string): boolean {
-  if (!baseUrl || !codeMieUrl) return true;
+function originOf(url: string): string | undefined {
   try {
-    return new URL(baseUrl).origin === new URL(codeMieUrl).origin;
+    return new URL(url).origin;
   } catch {
-    return true;
+    return undefined;
   }
+}
+
+/**
+ * Whether a profile with no identity of its own may still inherit a shared
+ * (pre-migration-008) `codeMieUrl`/`codeMieProject`/`codeMieIntegration`.
+ * Refuses only on positive evidence the shared value belongs to a *different*
+ * profile's environment — never merely because origins differ, which is also
+ * true by design for a vendor-subscription profile (baseUrl is never the
+ * CodeMie backend) and for `ai-run-sso` with a split API host (baseUrl's
+ * origin need not match codeMieUrl's — see sso.auth.ts's VITE_API_URL
+ * resolution). All three must hold to refuse:
+ * - the profile talks to the CodeMie platform directly (`ai-run-sso` /
+ *   `bearer-auth`), so its `baseUrl` origin is expected to track `codeMieUrl`;
+ * - that origin differs from the shared `codeMieUrl`'s;
+ * - another CodeMie-platform profile's own `baseUrl` is on exactly that
+ *   shared origin, proving the shared value is provably someone else's.
+ * Reused by migration 008 (the permanent clone) and the statusline (its own
+ * inline copy, since it cannot import this module — see statusline.ts).
+ */
+export function canUseSharedIdentity(
+  profile: { provider?: string; baseUrl?: string },
+  siblingProfiles: Record<string, { provider?: string; baseUrl?: string }>,
+  ownName: string | undefined,
+  sharedCodeMieUrl?: string
+): boolean {
+  if (!isCodeMiePlatformProvider(profile.provider)) return true;
+  if (!sharedCodeMieUrl || !profile.baseUrl) return true;
+
+  const sharedOrigin = originOf(sharedCodeMieUrl);
+  const ownOrigin = originOf(profile.baseUrl);
+  if (!sharedOrigin || !ownOrigin || sharedOrigin === ownOrigin) return true;
+
+  const claimedBySibling = Object.entries(siblingProfiles).some(([name, sibling]) => {
+    if (name === ownName) return false;
+    if (!isCodeMiePlatformProvider(sibling.provider) || !sibling.baseUrl) return false;
+    return originOf(sibling.baseUrl) === sharedOrigin;
+  });
+  return !claimedBySibling;
 }
 
 /**
@@ -151,7 +184,7 @@ export class ConfigLoader {
       codeMieProject: (globalConfig as any).codeMieProject,
       codeMieIntegration: (globalConfig as any).codeMieIntegration
     };
-    const workspace = await this.resolveProfileWorkspace(workingDir, isLocalProfile, globalProfileIdentity, (globalConfig as any).baseUrl);
+    const workspace = await this.resolveProfileWorkspace(workingDir, isLocalProfile, globalProfileIdentity, selectedProfileName);
     Object.assign(config, this.removeUndefined(workspace));
 
     // 2. Environment variables (load .env first if in project)
@@ -253,27 +286,45 @@ export class ConfigLoader {
    * @param isLocalProfile - Whether the profile in use is defined in the local config
    * @param profileIdentity - Identity already resolved from the global profile
    *   itself, if any; a key present here always wins over the shared value
-   * @param profileBaseUrl - The in-use profile's own `baseUrl`, used to guard the
-   *   shared-workspace fallback: a shared `codeMieUrl` whose origin doesn't match
-   *   this profile's backend belongs to a different profile/environment and must
-   *   not be used (same guard migration 008 applies when cloning identity)
+   * @param profileName - Name of the global profile in use, used to look up its
+   *   own `baseUrl`/`provider` and its siblings for canUseSharedIdentity(). The
+   *   fallback source is always the GLOBAL shared workspace (never a repo-local
+   *   one from resolveWorkspace() above — a repo's own workspace is an unrelated
+   *   project-context overlay with its own separate compatibility rules).
    */
   static async resolveProfileWorkspace(
     workingDir: string,
     isLocalProfile: boolean,
     profileIdentity: Partial<WorkspaceConfig> = {},
-    profileBaseUrl?: string
+    profileName?: string
   ): Promise<WorkspaceConfig> {
     const workspace = await this.resolveWorkspace(workingDir);
     if (isLocalProfile) {
       return workspace;
     }
 
+    const { profiles: allProfiles, workspace: globalWorkspace } = await this.loadMultiProviderConfig();
+    const ownProfile = (profileName && allProfiles?.[profileName]) || {};
+    const canUseShared = canUseSharedIdentity(
+      ownProfile,
+      allProfiles ?? {},
+      profileName,
+      (globalWorkspace as any)?.codeMieUrl
+    );
+
     const result: Record<string, unknown> = { ...workspace };
-    const fallbackAllowed = originsMatch(profileBaseUrl, (workspace as any).codeMieUrl);
     for (const key of this.IDENTITY_KEYS) {
-      if ((profileIdentity as any)[key] !== undefined || !fallbackAllowed) {
-        delete result[key];
+      delete result[key];
+      // Trust the profile's own stored identity even when the caller passed an
+      // empty/incomplete profileIdentity (e.g. listProfiles() looks it up by name
+      // alone) — never let the shared-workspace fallback below clobber a value
+      // the profile already owns.
+      if ((profileIdentity as any)[key] !== undefined || (ownProfile as any)[key] !== undefined || !canUseShared) {
+        continue;
+      }
+      const sharedValue = (globalWorkspace as any)?.[key];
+      if (sharedValue !== undefined) {
+        (result as any)[key] = sharedValue;
       }
     }
     return result as WorkspaceConfig;
@@ -1366,7 +1417,7 @@ export class ConfigLoader {
       codeMieIntegration: (globalConfig as any).codeMieIntegration
     };
     const profileWorkspace: Record<string, unknown> = {
-      ...(await this.resolveProfileWorkspace(workingDir, isLocalProfile, globalProfileIdentity, (globalConfig as any).baseUrl))
+      ...(await this.resolveProfileWorkspace(workingDir, isLocalProfile, globalProfileIdentity, selectedProfileName))
     };
     const identityWorkspace: Record<string, unknown> = {};
     for (const key of this.IDENTITY_KEYS) {
