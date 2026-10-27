@@ -26,6 +26,20 @@ export type { CodeMieConfigOptions, CodeMieIntegrationInfo, ConfigWithSource, Co
 
 export { StorageScope };
 
+// A profile's own baseUrl and a shared codeMieUrl should point at the same backend
+// (SSO's buildConfig derives baseUrl from codeMieUrl). A mismatch means the shared
+// value was last saved for a different profile/environment — exactly the pre-fix
+// bug's own symptom — so falling back to it would pin the wrong project/integration
+// onto this profile's analytics attribution. Mirrors the same guard in migration 008.
+function originsMatch(baseUrl?: string, codeMieUrl?: string): boolean {
+  if (!baseUrl || !codeMieUrl) return true;
+  try {
+    return new URL(baseUrl).origin === new URL(codeMieUrl).origin;
+  } catch {
+    return true;
+  }
+}
+
 /**
  * Unified configuration loader with priority system:
  * CLI args > Env vars > Project config > Global config > Defaults
@@ -137,7 +151,7 @@ export class ConfigLoader {
       codeMieProject: (globalConfig as any).codeMieProject,
       codeMieIntegration: (globalConfig as any).codeMieIntegration
     };
-    const workspace = await this.resolveProfileWorkspace(workingDir, isLocalProfile, globalProfileIdentity);
+    const workspace = await this.resolveProfileWorkspace(workingDir, isLocalProfile, globalProfileIdentity, (globalConfig as any).baseUrl);
     Object.assign(config, this.removeUndefined(workspace));
 
     // 2. Environment variables (load .env first if in project)
@@ -239,11 +253,16 @@ export class ConfigLoader {
    * @param isLocalProfile - Whether the profile in use is defined in the local config
    * @param profileIdentity - Identity already resolved from the global profile
    *   itself, if any; a key present here always wins over the shared value
+   * @param profileBaseUrl - The in-use profile's own `baseUrl`, used to guard the
+   *   shared-workspace fallback: a shared `codeMieUrl` whose origin doesn't match
+   *   this profile's backend belongs to a different profile/environment and must
+   *   not be used (same guard migration 008 applies when cloning identity)
    */
   static async resolveProfileWorkspace(
     workingDir: string,
     isLocalProfile: boolean,
-    profileIdentity: Partial<WorkspaceConfig> = {}
+    profileIdentity: Partial<WorkspaceConfig> = {},
+    profileBaseUrl?: string
   ): Promise<WorkspaceConfig> {
     const workspace = await this.resolveWorkspace(workingDir);
     if (isLocalProfile) {
@@ -251,8 +270,9 @@ export class ConfigLoader {
     }
 
     const result: Record<string, unknown> = { ...workspace };
+    const fallbackAllowed = originsMatch(profileBaseUrl, (workspace as any).codeMieUrl);
     for (const key of this.IDENTITY_KEYS) {
-      if ((profileIdentity as any)[key] !== undefined) {
+      if ((profileIdentity as any)[key] !== undefined || !fallbackAllowed) {
         delete result[key];
       }
     }
@@ -1346,7 +1366,7 @@ export class ConfigLoader {
       codeMieIntegration: (globalConfig as any).codeMieIntegration
     };
     const profileWorkspace: Record<string, unknown> = {
-      ...(await this.resolveProfileWorkspace(workingDir, isLocalProfile, globalProfileIdentity))
+      ...(await this.resolveProfileWorkspace(workingDir, isLocalProfile, globalProfileIdentity, (globalConfig as any).baseUrl))
     };
     const identityWorkspace: Record<string, unknown> = {};
     for (const key of this.IDENTITY_KEYS) {

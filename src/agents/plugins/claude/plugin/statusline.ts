@@ -725,8 +725,26 @@ export async function resolveBudget({
 
   const profile = config.profiles?.[profileName];
   const { baseUrl } = profile ?? {};
-  // Per-profile identity: each profile resolves its own CodeMie URL.
-  const codeMieUrl = profile?.codeMieUrl;
+  // Per-profile identity: each profile resolves its own CodeMie URL. A profile that
+  // predates migration 008 (e.g. this statusline ran before `bin/codemie.js` ever had
+  // a chance to migrate it — only that launcher runs pending migrations) has none of
+  // its own yet, so fall back to the shared workspace value — migration 008 always
+  // strips it once it runs, so a non-empty value here can only mean "not yet
+  // migrated", never a post-migration leftover. Guarded by origin, same as the
+  // migration itself: a mismatch means the shared value belongs to a different
+  // profile's backend and must not be resurrected here.
+  let codeMieUrl = profile?.codeMieUrl;
+  if (!codeMieUrl && config.workspace?.codeMieUrl && baseUrl) {
+    let sameOriginAsShared = false;
+    try {
+      sameOriginAsShared = new URL(baseUrl).origin === new URL(config.workspace.codeMieUrl).origin;
+    } catch {
+      sameOriginAsShared = false;
+    }
+    if (sameOriginAsShared) {
+      codeMieUrl = config.workspace.codeMieUrl;
+    }
+  }
   const userEmail = config.userEmail;
   if (!profile || !codeMieUrl || !baseUrl || !userEmail) {
     return { budget: null, budgetError: null }; // no CodeMie profile configured → skip silently

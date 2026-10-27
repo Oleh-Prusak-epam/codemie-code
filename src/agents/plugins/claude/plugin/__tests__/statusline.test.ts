@@ -338,12 +338,27 @@ describe('resolveBudget', () => {
     expect(result).toEqual({ budget: null, budgetError: 'reauthenticate' }); // got past the codeMieUrl check, reached auth
   });
 
-  it('skips silently when a stale shared workspace.codeMieUrl exists but the active profile has none', async () => {
-    // A leftover shared value must not fall back — only the profile's own counts.
+  it('falls back to the shared workspace.codeMieUrl when the active profile predates migration 008', async () => {
+    // Migration 008 always strips codeMieUrl from workspace once it runs, so a non-empty
+    // workspace.codeMieUrl here only ever means the profile hasn't been migrated yet
+    // (e.g. a `codemie-claude` launch before `bin/codemie.js` ever ran migrations) —
+    // not a stale leftover. The profile's own value still wins when present.
     const readFile = readFileFor({
       activeProfile: 'default',
       userEmail: 'me@x.com',
-      workspace: { codeMieUrl: 'https://stale-shared.example.com' },
+      workspace: { codeMieUrl: 'https://shared.example.com' },
+      profiles: { default: { baseUrl: 'https://shared.example.com/api' } },
+    });
+    const getAuthHeadersImpl = vi.fn().mockResolvedValue(null);
+    const result = await resolveBudget({ readFile, writeFile: vi.fn(), fetchImpl: vi.fn(), getAuthHeadersImpl });
+    expect(result).toEqual({ budget: null, budgetError: 'reauthenticate' }); // got past the codeMieUrl check, reached auth
+  });
+
+  it('does not fall back to the shared workspace.codeMieUrl when it points at a different origin than the profile baseUrl', async () => {
+    const readFile = readFileFor({
+      activeProfile: 'default',
+      userEmail: 'me@x.com',
+      workspace: { codeMieUrl: 'https://other-env.example.com' },
       profiles: { default: { baseUrl: 'https://x/api' } },
     });
     const result = await resolveBudget({ readFile, writeFile: vi.fn(), fetchImpl: vi.fn(), getAuthHeadersImpl: vi.fn() });

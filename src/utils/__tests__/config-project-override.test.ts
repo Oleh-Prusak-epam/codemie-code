@@ -815,6 +815,30 @@ describe('ConfigLoader - workspace resolution and project-only composition', () 
       expect(cfg.codeMieProject).toBe('work-proj');
     });
 
+    it('does not fall back to the shared workspace identity before migration 008 when it belongs to a different environment', async () => {
+      // Pre-008 shape, but the shared workspace was last saved for a *different*
+      // profile's backend (origin mismatch) — exactly the pre-fix bug's own
+      // symptom. Falling back here would pin another environment's project
+      // onto this profile, same as migration 008's own originsMatch() guards
+      // against; the runtime fallback must apply the same guard.
+      await writeGlobal('medecision', {
+        medecision: {
+          provider: 'ai-run-sso',
+          baseUrl: 'https://codemie.gcp.medecision.com/code-assistant-api',
+          model: 'claude-sonnet-4-6',
+          name: 'medecision'
+        }
+      });
+      const globalRaw = JSON.parse(await fs.readFile(GLOBAL_CONFIG_PATH, 'utf-8'));
+      globalRaw.workspace = { codeMieUrl: 'https://codemie.lab.epam.com', codeMieProject: 'other-env-proj' };
+      await fs.writeFile(GLOBAL_CONFIG_PATH, JSON.stringify(globalRaw, null, 2));
+
+      const cfg = await ConfigLoader.load(path.join(TEST_DIR, 'project'), { name: 'medecision' });
+
+      expect(cfg.codeMieUrl).toBeUndefined();
+      expect(cfg.codeMieProject).toBeUndefined();
+    });
+
     it('a global profile\'s own identity always wins over a stale shared workspace value, migrated or not', async () => {
       await writeGlobal('work', {
         work: {
