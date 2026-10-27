@@ -132,7 +132,12 @@ export class ConfigLoader {
     // whole-object override (local scope, else global), CodeMie identity from the
     // scope of the profile in use.
     const isLocalProfile = Object.keys(effectiveLocalConfig).length > 0;
-    const workspace = await this.resolveProfileWorkspace(workingDir, isLocalProfile);
+    const globalProfileIdentity: Partial<WorkspaceConfig> = {
+      codeMieUrl: (globalConfig as any).codeMieUrl,
+      codeMieProject: (globalConfig as any).codeMieProject,
+      codeMieIntegration: (globalConfig as any).codeMieIntegration
+    };
+    const workspace = await this.resolveProfileWorkspace(workingDir, isLocalProfile, globalProfileIdentity);
     Object.assign(config, this.removeUndefined(workspace));
 
     // 2. Environment variables (load .env first if in project)
@@ -223,15 +228,23 @@ export class ConfigLoader {
   /**
    * Resolve the workspace for the profile in use. Tooling-context fields follow
    * resolveWorkspace(). For a global profile, identity fields (codeMieUrl,
-   * codeMieProject, codeMieIntegration) are deliberately excluded here — they
-   * live on the profile itself and are merged in earlier by load()/
-   * loadWithSources(); returning them here too could clobber that with stale
-   * shared-workspace values.
+   * codeMieProject, codeMieIntegration) normally come from the profile itself
+   * (merged in earlier by load()/loadWithSources()), not from here — but a
+   * profile that predates migration 008 (e.g. a `bin/codemie-*` launcher ran
+   * before `bin/codemie.js` ever had a chance to migrate it) has none of its
+   * own yet, so this falls back to the shared workspace value per key rather
+   * than dropping identity entirely.
    *
    * @param workingDir - Directory whose local config is considered
    * @param isLocalProfile - Whether the profile in use is defined in the local config
+   * @param profileIdentity - Identity already resolved from the global profile
+   *   itself, if any; a key present here always wins over the shared value
    */
-  static async resolveProfileWorkspace(workingDir: string, isLocalProfile: boolean): Promise<WorkspaceConfig> {
+  static async resolveProfileWorkspace(
+    workingDir: string,
+    isLocalProfile: boolean,
+    profileIdentity: Partial<WorkspaceConfig> = {}
+  ): Promise<WorkspaceConfig> {
     const workspace = await this.resolveWorkspace(workingDir);
     if (isLocalProfile) {
       return workspace;
@@ -239,7 +252,9 @@ export class ConfigLoader {
 
     const result: Record<string, unknown> = { ...workspace };
     for (const key of this.IDENTITY_KEYS) {
-      delete result[key];
+      if ((profileIdentity as any)[key] !== undefined) {
+        delete result[key];
+      }
     }
     return result as WorkspaceConfig;
   }
@@ -677,8 +692,15 @@ export class ConfigLoader {
     const preservedIdentity: Partial<ProviderProfile> = {};
     if (existingProfile) {
       for (const key of this.IDENTITY_KEYS) {
-        if ((profileFields as any)[key] === undefined && (existingProfile as any)[key] !== undefined) {
-          (preservedIdentity as any)[key] = (existingProfile as any)[key];
+        if ((profileFields as any)[key] === undefined) {
+          if ((existingProfile as any)[key] !== undefined) {
+            (preservedIdentity as any)[key] = (existingProfile as any)[key];
+          }
+          // An explicit `key: undefined` (e.g. a provider's buildConfig() that
+          // always sets the key, `as string | undefined`) is still an own
+          // property and would override preservedIdentity in the spread below —
+          // drop it so "omitted" and "explicitly undefined" behave the same way.
+          delete (profileFields as any)[key];
         }
       }
     }
@@ -1318,8 +1340,13 @@ export class ConfigLoader {
     const workspaceSource: 'project' | 'global' = localWorkspaceScope.workspace != null ? 'project' : 'global';
     const isLocalProfile = Object.keys(effectiveLocalConfig).length > 0;
     const identitySource = await this.resolveIdentitySource(workingDir, isLocalProfile);
+    const globalProfileIdentity: Partial<WorkspaceConfig> = {
+      codeMieUrl: (globalConfig as any).codeMieUrl,
+      codeMieProject: (globalConfig as any).codeMieProject,
+      codeMieIntegration: (globalConfig as any).codeMieIntegration
+    };
     const profileWorkspace: Record<string, unknown> = {
-      ...(await this.resolveProfileWorkspace(workingDir, isLocalProfile))
+      ...(await this.resolveProfileWorkspace(workingDir, isLocalProfile, globalProfileIdentity))
     };
     const identityWorkspace: Record<string, unknown> = {};
     for (const key of this.IDENTITY_KEYS) {

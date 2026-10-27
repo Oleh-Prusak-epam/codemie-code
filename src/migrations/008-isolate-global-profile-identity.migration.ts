@@ -12,9 +12,24 @@ function hasIdentity(source: WorkspaceConfig | ProviderProfile): boolean {
   return source.codeMieUrl !== undefined || source.codeMieProject !== undefined || source.codeMieIntegration !== undefined;
 }
 
+// A profile's own baseUrl and the shared codeMieUrl should point at the same
+// backend (SSO's buildConfig derives baseUrl from codeMieUrl). A mismatch
+// means the shared value was last saved for a different profile/environment —
+// the pre-fix bug's own symptom — so copying it here would pin the wrong
+// project/integration onto this profile's analytics attribution.
+function originsMatch(baseUrl?: string, codeMieUrl?: string): boolean {
+  if (!baseUrl || !codeMieUrl) return true;
+  try {
+    return new URL(baseUrl).origin === new URL(codeMieUrl).origin;
+  } catch {
+    return true;
+  }
+}
+
 // Per-field gap-fill, not all-or-nothing: a profile with its own
 // codeMieProject but no codeMieUrl still gets codeMieUrl filled in.
 function withIdentityFrom(profile: ProviderProfile, source: WorkspaceConfig): ProviderProfile {
+  if (!originsMatch(profile.baseUrl, source.codeMieUrl)) return profile;
   const cloned: ProviderProfile = { ...profile };
   if (cloned.codeMieUrl === undefined && source.codeMieUrl !== undefined) cloned.codeMieUrl = source.codeMieUrl;
   if (cloned.codeMieProject === undefined && source.codeMieProject !== undefined) cloned.codeMieProject = source.codeMieProject;

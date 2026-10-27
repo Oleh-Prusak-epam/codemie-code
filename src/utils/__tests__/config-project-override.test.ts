@@ -464,6 +464,35 @@ describe('ConfigLoader - Project-Level Configuration', () => {
       expect((config.profiles.work as any).codeMieUrl).toBe('https://y');
     });
 
+    it('saveProfile preserves identity when the update sets it to an explicit undefined, not just when the key is omitted', async () => {
+      await ConfigLoader.saveProfile('p1', {
+        provider: 'anthropic-subscription',
+        codeMieUrl: 'https://x',
+        codeMieProject: 'proj',
+        baseUrl: 'https://api.anthropic.com',
+        model: 'claude-sonnet-4-6'
+      } as any);
+
+      // anthropic-subscription's buildConfig() always sets these keys, as
+      // `... as string | undefined` — an explicit own property with value
+      // `undefined` when the user declines the analytics login, not an
+      // omitted key.
+      await ConfigLoader.saveProfile('p1', {
+        provider: 'anthropic-subscription',
+        baseUrl: 'https://api.anthropic.com',
+        model: 'claude-opus-5-5',
+        codeMieUrl: undefined,
+        codeMieProject: undefined
+      } as any);
+
+      const content = await fs.readFile(GLOBAL_CONFIG_PATH, 'utf-8');
+      const config: MultiProviderConfig = JSON.parse(content);
+
+      expect((config.profiles.p1 as any).codeMieUrl).toBe('https://x');
+      expect((config.profiles.p1 as any).codeMieProject).toBe('proj');
+      expect(config.profiles.p1.model).toBe('claude-opus-5-5');
+    });
+
     it('initProjectConfig routes workspace fields into the local scope workspace, not into profiles[name]', async () => {
       const workingDir = path.join(TEST_DIR, 'project');
       await ConfigLoader.initProjectConfig(workingDir, {
@@ -763,12 +792,58 @@ describe('ConfigLoader - workspace resolution and project-only composition', () 
       });
     });
 
+    it('a global profile with no identity of its own still resolves it from the shared workspace before migration 008 has run', async () => {
+      // Pre-008 shape: identity lives only on the shared workspace, not yet
+      // copied onto the profile. A non-`codemie` launcher (e.g. `codemie-claude`)
+      // never runs pending migrations, so this state must still resolve
+      // identity rather than going empty until some other command migrates it.
+      await writeGlobal('work', {
+        work: {
+          provider: 'ai-run-sso',
+          baseUrl: 'https://work.example.com/code-assistant-api',
+          model: 'claude-sonnet-4-6',
+          name: 'work'
+        }
+      });
+      const globalRaw = JSON.parse(await fs.readFile(GLOBAL_CONFIG_PATH, 'utf-8'));
+      globalRaw.workspace = { codeMieUrl: 'https://work.example.com', codeMieProject: 'work-proj' };
+      await fs.writeFile(GLOBAL_CONFIG_PATH, JSON.stringify(globalRaw, null, 2));
+
+      const cfg = await ConfigLoader.load(path.join(TEST_DIR, 'project'), { name: 'work' });
+
+      expect(cfg.codeMieUrl).toBe('https://work.example.com');
+      expect(cfg.codeMieProject).toBe('work-proj');
+    });
+
+    it('a global profile\'s own identity always wins over a stale shared workspace value, migrated or not', async () => {
+      await writeGlobal('work', {
+        work: {
+          provider: 'ai-run-sso',
+          codeMieUrl: 'https://work.example.com',
+          codeMieProject: 'work-proj',
+          baseUrl: 'https://work.example.com/code-assistant-api',
+          model: 'claude-sonnet-4-6',
+          name: 'work'
+        }
+      });
+      // Stale leftover from another profile, as the pre-fix bug would have left.
+      const globalRaw = JSON.parse(await fs.readFile(GLOBAL_CONFIG_PATH, 'utf-8'));
+      globalRaw.workspace = { codeMieUrl: 'https://stale.example.com', codeMieProject: 'stale-proj' };
+      await fs.writeFile(GLOBAL_CONFIG_PATH, JSON.stringify(globalRaw, null, 2));
+
+      const cfg = await ConfigLoader.load(path.join(TEST_DIR, 'project'), { name: 'work' });
+
+      expect(cfg.codeMieUrl).toBe('https://work.example.com');
+      expect(cfg.codeMieProject).toBe('work-proj');
+    });
+
     it('two global profiles targeting different CodeMie environments resolve their own identity independently (AC7)', async () => {
       await writeGlobal('env-a', {
         'env-a': {
           provider: 'ai-run-sso',
           codeMieUrl: 'https://a.example.com',
           codeMieProject: 'proj-a',
+          codeMieIntegration: { id: 'int-a', alias: 'alias-a' } as CodeMieIntegrationInfo,
           baseUrl: 'https://a.example.com/code-assistant-api',
           model: 'claude-sonnet-4-6',
           name: 'env-a'
@@ -777,6 +852,7 @@ describe('ConfigLoader - workspace resolution and project-only composition', () 
           provider: 'ai-run-sso',
           codeMieUrl: 'https://b.example.com',
           codeMieProject: 'proj-b',
+          codeMieIntegration: { id: 'int-b', alias: 'alias-b' } as CodeMieIntegrationInfo,
           baseUrl: 'https://b.example.com/code-assistant-api',
           model: 'claude-sonnet-4-6',
           name: 'env-b'
@@ -793,8 +869,19 @@ describe('ConfigLoader - workspace resolution and project-only composition', () 
 
       expect(cfgA.codeMieUrl).toBe('https://a.example.com');
       expect(cfgA.codeMieProject).toBe('proj-a');
+      expect((cfgA as any).codeMieIntegration?.id).toBe('int-a');
       expect(cfgB.codeMieUrl).toBe('https://b.example.com');
       expect(cfgB.codeMieProject).toBe('proj-b');
+      expect((cfgB as any).codeMieIntegration?.id).toBe('int-b');
+
+      const envA = ConfigLoader.exportProviderEnvVars(cfgA);
+      const envB = ConfigLoader.exportProviderEnvVars(cfgB);
+      expect(envA.CODEMIE_URL).toBe('https://a.example.com');
+      expect(envA.CODEMIE_PROJECT).toBe('proj-a');
+      expect(envA.CODEMIE_INTEGRATION_ID).toBe('int-a');
+      expect(envB.CODEMIE_URL).toBe('https://b.example.com');
+      expect(envB.CODEMIE_PROJECT).toBe('proj-b');
+      expect(envB.CODEMIE_INTEGRATION_ID).toBe('int-b');
     });
 
     it('switching back to the first global profile restores its own identity (AC8)', async () => {
@@ -803,6 +890,7 @@ describe('ConfigLoader - workspace resolution and project-only composition', () 
           provider: 'ai-run-sso',
           codeMieUrl: 'https://a.example.com',
           codeMieProject: 'proj-a',
+          codeMieIntegration: { id: 'int-a', alias: 'alias-a' } as CodeMieIntegrationInfo,
           baseUrl: 'https://a.example.com/code-assistant-api',
           model: 'claude-sonnet-4-6',
           name: 'env-a'
@@ -811,6 +899,7 @@ describe('ConfigLoader - workspace resolution and project-only composition', () 
           provider: 'ai-run-sso',
           codeMieUrl: 'https://b.example.com',
           codeMieProject: 'proj-b',
+          codeMieIntegration: { id: 'int-b', alias: 'alias-b' } as CodeMieIntegrationInfo,
           baseUrl: 'https://b.example.com/code-assistant-api',
           model: 'claude-sonnet-4-6',
           name: 'env-b'
@@ -821,12 +910,20 @@ describe('ConfigLoader - workspace resolution and project-only composition', () 
       globalRaw.workspace = { codeMieUrl: 'https://b.example.com', codeMieProject: 'proj-b' };
       await fs.writeFile(GLOBAL_CONFIG_PATH, JSON.stringify(globalRaw, null, 2));
 
-      await ConfigLoader.load(path.join(TEST_DIR, 'project'), { name: 'env-a' });
-      await ConfigLoader.load(path.join(TEST_DIR, 'project'), { name: 'env-b' });
-      const backToA = await ConfigLoader.load(path.join(TEST_DIR, 'project'), { name: 'env-a' });
+      const workingDir = path.join(TEST_DIR, 'project');
+      await ConfigLoader.switchProfile('env-a', workingDir);
+      await ConfigLoader.switchProfile('env-b', workingDir);
+      await ConfigLoader.switchProfile('env-a', workingDir);
+      const backToA = await ConfigLoader.load(workingDir);
 
       expect(backToA.codeMieUrl).toBe('https://a.example.com');
       expect(backToA.codeMieProject).toBe('proj-a');
+      expect((backToA as any).codeMieIntegration?.id).toBe('int-a');
+
+      const envBackToA = ConfigLoader.exportProviderEnvVars(backToA);
+      expect(envBackToA.CODEMIE_URL).toBe('https://a.example.com');
+      expect(envBackToA.CODEMIE_PROJECT).toBe('proj-a');
+      expect(envBackToA.CODEMIE_INTEGRATION_ID).toBe('int-a');
     });
 
     it('loadWithSources reports a global profile\'s own identity with source "global", not "project"', async () => {

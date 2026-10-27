@@ -73,6 +73,30 @@ describe('IsolateGlobalProfileIdentityMigration', () => {
     expect(result.workspace?.codeMieUrl).toBeUndefined();
   });
 
+  it('skips the copy for a profile whose baseUrl origin does not match the shared codeMieUrl, to avoid pinning another environment\'s project onto it', () => {
+    const config: any = {
+      version: 2,
+      activeProfile: 'env-a',
+      profiles: {
+        // Last profile saved before the bug fix — its own backend, but the
+        // shared workspace identity now belongs to a different one.
+        'medecision': { provider: 'ai-run-sso', baseUrl: 'https://codemie.gcp.medecision.com/code-assistant-api' },
+        'env-b': { provider: 'ai-run-sso', baseUrl: 'https://shared.example.com/code-assistant-api' }
+      },
+      workspace: {
+        codeMieUrl: 'https://shared.example.com',
+        codeMieProject: 'shared-proj'
+      }
+    };
+
+    const result = migrate(config);
+
+    expect((result.profiles['medecision'] as any).codeMieUrl).toBeUndefined();
+    expect((result.profiles['medecision'] as any).codeMieProject).toBeUndefined();
+    expect((result.profiles['env-b'] as any).codeMieUrl).toBe('https://shared.example.com');
+    expect((result.profiles['env-b'] as any).codeMieProject).toBe('shared-proj');
+  });
+
   it('is a no-op when workspace has no identity fields', () => {
     const config: any = {
       version: 2,
