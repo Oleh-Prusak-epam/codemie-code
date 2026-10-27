@@ -55,10 +55,8 @@ export interface ProviderProfile {
   apiKey?: string;
   model?: string;
 
-  // CodeMie identity — isolated per profile so switching between global
-  // profiles never leaks another profile's URL/project/integration
-  // (EPMCDME-15411). Local profiles continue to resolve identity from the
-  // local-scope WorkspaceConfig instead (see resolveProfileWorkspace()).
+  // Per-global-profile CodeMie identity; local profiles still resolve
+  // identity via WorkspaceConfig (see resolveProfileWorkspace()).
   codeMieUrl?: string;
   codeMieProject?: string;
   codeMieIntegration?: CodeMieIntegrationInfo;

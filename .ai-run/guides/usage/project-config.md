@@ -152,7 +152,7 @@ scope of the profile in use. A local profile (defined in `.codemie/codemie-cli.c
 uses the local workspace, falling back to the global one when the local config has none. A
 **global** profile resolves its own identity directly from the profile itself — each global
 profile stores its own `codeMieUrl`/`codeMieProject`/`codeMieIntegration`, so switching between
-global profiles never leaks one profile's identity onto another (EPMCDME-15411). Only non-identity
+global profiles never leaks one profile's identity onto another. Only non-identity
 workspace fields (`hooks`, `plugins`, `assistants`, `skillsSearchUrl`, `claudeAutocompactPct`,
 `metrics`) remain scope-level shared across global profiles.
 

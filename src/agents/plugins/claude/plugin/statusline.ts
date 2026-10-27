@@ -725,8 +725,7 @@ export async function resolveBudget({
 
   const profile = config.profiles?.[profileName];
   const { baseUrl } = profile ?? {};
-  // codeMieUrl now lives directly on each global profile (EPMCDME-15411) so that
-  // switching the active profile resolves that profile's own CodeMie identity.
+  // Per-profile identity: each profile resolves its own CodeMie URL.
   const codeMieUrl = profile?.codeMieUrl;
   const userEmail = config.userEmail;
   if (!profile || !codeMieUrl || !baseUrl || !userEmail) {

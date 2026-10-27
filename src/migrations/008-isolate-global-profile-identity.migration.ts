@@ -4,22 +4,16 @@ import { ConfigLoader } from '../utils/config.js';
 import type { MultiProviderConfig, ProviderProfile, WorkspaceConfig } from '../env/types.js';
 
 /**
- * CodeMie connectivity identity — isolated per global profile so switching
- * between global profiles never leaks one profile's identity onto another
- * (EPMCDME-15411). Handled as three explicit fields rather than a generic
- * keyof loop, mirroring migration 007's independence from ConfigLoader
- * internals: a generic loop over a mixed-type key union (codeMieIntegration
- * is an object, the other two are strings) cannot stay type-safe without an
- * `any` escape hatch, so each field is copied/stripped by name instead.
+ * Isolates CodeMie identity per global profile. Each field is handled by name
+ * rather than a generic keyof loop, since codeMieIntegration is an object and
+ * the others are strings — a mixed-type loop needs an `any` escape hatch.
  */
 function hasIdentity(source: WorkspaceConfig | ProviderProfile): boolean {
   return source.codeMieUrl !== undefined || source.codeMieProject !== undefined || source.codeMieIntegration !== undefined;
 }
 
-// Fills only the identity fields the profile is missing — a profile that
-// already defines e.g. its own codeMieProject but not codeMieUrl must still
-// receive codeMieUrl from the shared workspace, not be skipped wholesale
-// (a per-field gap-fill, not an all-or-nothing clone).
+// Per-field gap-fill, not all-or-nothing: a profile with its own
+// codeMieProject but no codeMieUrl still gets codeMieUrl filled in.
 function withIdentityFrom(profile: ProviderProfile, source: WorkspaceConfig): ProviderProfile {
   const cloned: ProviderProfile = { ...profile };
   if (cloned.codeMieUrl === undefined && source.codeMieUrl !== undefined) cloned.codeMieUrl = source.codeMieUrl;

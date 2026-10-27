@@ -222,13 +222,11 @@ export class ConfigLoader {
 
   /**
    * Resolve the workspace for the profile in use. Tooling-context fields follow
-   * resolveWorkspace(). CodeMie identity fields (codeMieUrl, codeMieProject,
-   * codeMieIntegration) are NOT part of this result for a global profile — they
-   * live directly on that profile's own ProviderProfile object (EPMCDME-15411)
-   * and are already merged into the caller's config earlier in load()/
-   * loadWithSources() via loadGlobalConfigProfile(). Returning them here too
-   * would let the shared global workspace's (possibly stale, pre-migration)
-   * identity clobber the profile's own correct values.
+   * resolveWorkspace(). For a global profile, identity fields (codeMieUrl,
+   * codeMieProject, codeMieIntegration) are deliberately excluded here — they
+   * live on the profile itself and are merged in earlier by load()/
+   * loadWithSources(); returning them here too could clobber that with stale
+   * shared-workspace values.
    *
    * @param workingDir - Directory whose local config is considered
    * @param isLocalProfile - Whether the profile in use is defined in the local config
@@ -623,12 +621,8 @@ export class ConfigLoader {
   ];
 
   /**
-   * Non-identity WorkspaceConfig keys. Unlike IDENTITY_KEYS, saveProfile() (a
-   * global-scope-only method) routes these into the shared global workspace —
-   * identity fields stay on the profile itself so each global profile resolves
-   * its own CodeMie identity independently (EPMCDME-15411). Derived from
-   * WORKSPACE_KEYS minus IDENTITY_KEYS rather than hand-duplicated, so a future
-   * field added to one list can never silently drift out of sync with the other.
+   * WORKSPACE_KEYS minus IDENTITY_KEYS — saveProfile() routes only these into
+   * the shared global workspace; identity stays on the profile itself.
    */
   private static readonly NON_IDENTITY_WORKSPACE_KEYS: (keyof WorkspaceConfig)[] = ConfigLoader.WORKSPACE_KEYS.filter(
     key => !ConfigLoader.IDENTITY_KEYS.includes(key)
@@ -639,9 +633,8 @@ export class ConfigLoader {
    * workspace half, so callers that persist a profile can route each half to
    * where it belongs (profiles[name] vs. the scope's workspace).
    *
-   * @param keys - Which WorkspaceConfig keys to split out; defaults to all of
-   *   WORKSPACE_KEYS (identity + non-identity), as initProjectConfig() needs for
-   *   local scope. saveProfile() passes NON_IDENTITY_WORKSPACE_KEYS instead.
+   * @param keys - WorkspaceConfig keys to split out; defaults to WORKSPACE_KEYS.
+   *   saveProfile() passes NON_IDENTITY_WORKSPACE_KEYS instead.
    */
   private static splitProfileAndWorkspace(
     input: Partial<CodeMieConfigOptions>,
@@ -669,22 +662,17 @@ export class ConfigLoader {
     // Strip top-level-only fields that must not live inside a profile
     const { codemieSkills: _skills, codemieAssistants: _assistants, ...cleanProfile } = profile as any;
 
-    // Identity fields (codeMieUrl/codeMieProject/codeMieIntegration) stay in
-    // profileFields — only non-identity workspace fields route to the shared
-    // global workspace (EPMCDME-15411).
+    // Identity stays in profileFields; only non-identity fields go to the
+    // shared global workspace.
     const { profile: profileFields, workspace: workspaceFields } = this.splitProfileAndWorkspace(
       cleanProfile,
       this.NON_IDENTITY_WORKSPACE_KEYS
     );
 
     (profileFields as any).name = profileName;
-    // Full-replace semantics stay intact for provider-specific fields (switching
-    // provider must drop the old provider's leftover fields, e.g. authMethod/
-    // jwtConfig when moving from jwt to sso) — but the identity trio is carried
-    // forward from the existing profile when the caller's update omits it
-    // (EPMCDME-15411): identity now lives directly on the profile, so a caller
-    // that updates unrelated fields (e.g. just `model`) without resupplying
-    // codeMieUrl/codeMieProject/codeMieIntegration must not silently wipe them.
+    // Provider-specific fields stay full-replace (switching provider drops
+    // stale fields like authMethod/jwtConfig), but identity carries forward
+    // from the existing profile when the update omits it.
     const existingProfile = config.profiles[profileName];
     const preservedIdentity: Partial<ProviderProfile> = {};
     if (existingProfile) {

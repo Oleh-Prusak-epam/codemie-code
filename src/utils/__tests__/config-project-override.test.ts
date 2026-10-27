@@ -411,7 +411,7 @@ describe('ConfigLoader - Project-Level Configuration', () => {
       expect(config.workspace?.claudeAutocompactPct).toBe(85);
     });
 
-    it('saveProfile merges onto the existing profile instead of replacing it, so an update that omits identity does not wipe previously saved identity (EPMCDME-15411)', async () => {
+    it('saveProfile merges onto the existing profile instead of replacing it, so an update that omits identity does not wipe previously saved identity', async () => {
       await ConfigLoader.saveProfile('p1', {
         provider: 'ai-run-sso',
         codeMieUrl: 'https://x',
@@ -420,9 +420,7 @@ describe('ConfigLoader - Project-Level Configuration', () => {
         model: 'claude-sonnet-4-6'
       } as any);
 
-      // A later update — e.g. re-running setup to change just the model — omits
-      // the identity fields entirely, the way a caller naturally would if it
-      // isn't re-collecting CodeMie URL/project on every update.
+      // A later update (e.g. changing just the model) naturally omits identity.
       await ConfigLoader.saveProfile('p1', {
         provider: 'ai-run-sso',
         baseUrl: 'https://x/code-assistant-api',
@@ -437,7 +435,7 @@ describe('ConfigLoader - Project-Level Configuration', () => {
       expect(config.profiles.p1.model).toBe('claude-opus-5-5');
     });
 
-    it('saveProfile does not leak stale provider-specific fields across a provider switch — only the identity trio carries forward (EPMCDME-15411)', async () => {
+    it('saveProfile does not leak stale provider-specific fields across a provider switch — only the identity trio carries forward', async () => {
       // jwt provider's buildConfig() sets authMethod/jwtConfig; sso's does not.
       await ConfigLoader.saveProfile('work', {
         provider: 'bearer-auth',
@@ -448,9 +446,7 @@ describe('ConfigLoader - Project-Level Configuration', () => {
         jwtConfig: { tokenEnvVar: 'MY_TOKEN' }
       } as any);
 
-      // User reconfigures the same profile name to a different provider via
-      // `codemie setup` → Update. sso's buildConfig() never emits
-      // authMethod/jwtConfig at all — they must not survive the switch.
+      // Switching provider must not let authMethod/jwtConfig survive.
       await ConfigLoader.saveProfile('work', {
         provider: 'ai-run-sso',
         codeMieUrl: 'https://y',
@@ -674,10 +670,9 @@ describe('ConfigLoader - workspace resolution and project-only composition', () 
       expect(cfg.codeMieUrl).toBe('https://global.example.com');
     });
 
-    it('falls back to the matching global profile\'s own identity when the global workspace no longer carries it (post migration 008, EPMCDME-15411)', async () => {
-      // Post-008 shape: identity lives on the global profile itself, not on the
-      // shared global workspace. A local profile with no local workspace of its
-      // own must still resolve identity via this path, not go empty.
+    it('falls back to the matching global profile\'s own identity when the global workspace no longer carries it (post migration 008)', async () => {
+      // Identity lives on the global profile itself, not the shared workspace.
+      // A local profile with no local workspace of its own must still resolve it.
       await writeGlobal('personal-anthropic', {
         'personal-anthropic': {
           provider: 'anthropic-subscription',
@@ -705,13 +700,9 @@ describe('ConfigLoader - workspace resolution and project-only composition', () 
     });
 
     it('resolves no identity (not a crash, not a stale leaked value) for a purely local-only profile name with no global counterpart and no own identity', async () => {
-      // 'local-only-profile' exists only in the local config — it has no matching
-      // key in global `profiles`, so migration 008 never had anything to clone onto
-      // it, and it never defines codeMieUrl/codeMieProject itself either. This is a
-      // narrow, pre-existing edge case (EPMCDME-15411): before this fix it would
-      // have read whatever was in the shared global workspace — exactly the kind of
-      // cross-profile identity leak this ticket removes. The correct outcome is no
-      // identity at all, not a crash and not another profile's leaked value.
+      // 'local-only-profile' has no matching key in global `profiles` and defines
+      // no identity of its own. The correct outcome is no identity at all — not
+      // a crash, and not another profile's leaked value.
       await writeGlobal('unrelated-global', {
         'unrelated-global': {
           provider: 'ai-run-sso',

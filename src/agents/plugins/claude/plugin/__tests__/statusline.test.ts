@@ -326,12 +326,11 @@ describe('resolveBudget', () => {
     expect(result).toEqual({ budget: null, budgetError: null });
   });
 
-  it('resolves codeMieUrl from the active profile itself, not from the shared workspace (EPMCDME-15411)', async () => {
+  it('resolves codeMieUrl from the active profile itself, not from the shared workspace', async () => {
+    // No top-level `workspace.codeMieUrl` — the profile carries its own.
     const readFile = readFileFor({
       activeProfile: 'default',
       userEmail: 'me@x.com',
-      // No top-level `workspace.codeMieUrl` at all — each global profile now
-      // carries its own codeMieUrl directly, so this must still resolve.
       profiles: { default: { codeMieUrl: 'https://x', baseUrl: 'https://x/api' } },
     });
     const getAuthHeadersImpl = vi.fn().mockResolvedValue(null);
@@ -340,8 +339,7 @@ describe('resolveBudget', () => {
   });
 
   it('skips silently when a stale shared workspace.codeMieUrl exists but the active profile has none', async () => {
-    // A leftover shared workspace value (pre EPMCDME-15411 fix / pre migration 008)
-    // must not be used as a fallback — only the profile's own codeMieUrl counts.
+    // A leftover shared value must not fall back — only the profile's own counts.
     const readFile = readFileFor({
       activeProfile: 'default',
       userEmail: 'me@x.com',
