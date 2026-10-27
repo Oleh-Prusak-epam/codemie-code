@@ -1,0 +1,50 @@
+{
+  "decision": "request-changes",
+  "rationale": "Acceptance lens (11/11 criteria, incl. AC9-11) and standards/git-workflow checks pass, but the edge-case lens's regression claim against AC5 was independently verified by reading src/utils/config.ts:209-247: resolveWorkspace() returns the global workspace wholesale as the fallback for a local profile with no local workspace object, and resolveProfileWorkspace() passes that through unmodified for local profiles. Migration 008 strips the identity trio from the global workspace entirely, so a local profile that previously inherited identity via that fallback silently loses it after this change lands — an unmitigated regression no task or test in this diff covers. Two further confirmed/plausible issues (saveProfile() full-replace risking silent identity wipe on unrelated updates; pervasive `as any` casts in the new migration violating the project's documented no-any convention) are real but independently fixable. 3 dismissed findings (statusline bypasses migrations — pre-existing, out of scope; saveMultiProviderConfig atomicity — pre-existing write pattern; splitProfileAndWorkspace default-param risk to initProjectConfig — verified unaffected, default keys unchanged) and 3 deferred (migration skip-if-any-identity-key-present is not reachable under the current pre-fix data invariant since no profile ever carried partial identity before this change; no down()/rollback for migration 008; duplicated IDENTITY_KEYS literal across config.ts and the migration file) are recorded here, not emitted as findings.",
+  "confidence": "low",
+  "risk_flags": ["breaking-change", "regression"],
+  "business_review": [
+    {"criterion": "Each global profile stores and resolves its own CodeMie identity independently", "kind": "story-ac", "status": "pass"},
+    {"criterion": "Switching between global profiles applies the selected profile's own identity", "kind": "story-ac", "status": "pass"},
+    {"criterion": "Identity fields are not overwritten across unrelated global profiles", "kind": "story-ac", "status": "pass"},
+    {"criterion": "resolveProfileWorkspace() resolves identity for a global profile from profile-specific data, not shared mutable workspace state", "kind": "story-ac", "status": "pass"},
+    {"criterion": "Existing local profile behavior is not regressed", "kind": "story-ac", "status": "fail", "notes": "CR-001: local profiles that inherit identity via the global-workspace fallback (no local workspace object defined) lose that identity once migration 008 strips it from the shared global workspace. Confirmed by reading src/utils/config.ts:209-247; not caught by any test in this diff."},
+    {"criterion": "Existing workspace behavior for non-identity WORKSPACE_KEYS fields remains scope-level shared", "kind": "story-ac", "status": "pass"},
+    {"criterion": "Regression coverage: two global profiles targeting different CodeMie environments resolve independently (AC7)", "kind": "story-ac", "status": "pass"},
+    {"criterion": "Regression coverage: switching back to the first global profile restores its own identity (AC8)", "kind": "story-ac", "status": "pass"},
+    {"criterion": "Migration clones shared identity onto every existing global profile, handling LegacyConfig v1 and v2 inputs", "kind": "story-ac", "status": "pass", "notes": "v1 coverage is indirect, via loadMultiProviderConfig()'s pre-existing legacy normalization rather than an explicit v1 fixture in the new migration test."},
+    {"criterion": "Statusline's direct config.workspace?.codeMieUrl bypass fixed to resolve per-profile identity", "kind": "story-ac", "status": "pass"},
+    {"criterion": "Stale project-config.md contract updated to the corrected per-profile identity contract", "kind": "story-ac", "status": "pass"}
+  ],
+  "standards_review": [
+    {"standard": "git-workflow: commit subjects and ticket reference format", "status": "pass", "notes": "All 3 commits use Conventional Commits, reference EPMCDME-15411, end with the required attribution footer."},
+    {"standard": "code-quality: no `any` (documented TypeScript convention)", "status": "fail", "notes": "src/migrations/008-isolate-global-profile-identity.migration.ts casts to `as any` on every identity-key access instead of using the typed WorkspaceConfig/ProviderProfile shapes."},
+    {"standard": "security: credentials, sanitization, path validation", "status": "pass", "notes": "No secrets, raw tokens, or unsafe path handling introduced; identity fields (URL/project/integration) are not credentials."}
+  ],
+  "findings": [
+    {
+      "id": "CR-001",
+      "triage": "decision_needed",
+      "severity": "critical",
+      "problem": "Migration 008 strips codeMieUrl/codeMieProject/codeMieIntegration from the shared global workspace unconditionally, but resolveWorkspace() (src/utils/config.ts:209-221) still returns that same global workspace wholesale as the fallback for any local profile whose local config defines no `workspace` object of its own, and resolveProfileWorkspace() (lines 236-247) passes it through unmodified when isLocalProfile is true.",
+      "impact": "A local profile that previously inherited its CodeMie identity via the documented global-workspace fallback silently loses that identity the moment this fix's migration runs — a direct regression of AC5 ('existing local profile behavior is not regressed'). No task in plan.md and no test in this diff exercises the post-migration end state for this path; the existing test at config-project-override.test.ts:592 hand-writes identity directly into the workspace fixture rather than simulating what migration 008 leaves behind.",
+      "recommendation": "Needs a design decision, not a one-line patch: either (a) have local-without-own-workspace resolution also fall back to the active global profile's own identity fields (requires threading the resolved profile name into resolveWorkspace()/resolveProfileWorkspace()), or (b) explicitly scope this ticket's fix to global profiles only and document/test that a local profile must define its own workspace.codeMieUrl/codeMieProject once migration 008 has run. Add a regression test that runs migration 008 against a fixture with a local profile relying on the global-workspace fallback, then asserts the resolved identity."
+    },
+    {
+      "id": "CR-002",
+      "triage": "patch",
+      "severity": "major",
+      "problem": "saveProfile() replaces the whole profiles[name] object rather than merging fields into it (src/utils/config.ts, saveProfile implementation).",
+      "impact": "Now that codeMieUrl/codeMieProject/codeMieIntegration live directly on the profile object, any call to saveProfile() that updates an unrelated field (e.g. model or baseUrl) without re-supplying the identity trio will silently wipe that profile's previously-saved identity. This risk did not exist pre-fix, since identity lived on the shared workspace and was untouched by profile-only saves.",
+      "recommendation": "Merge incoming profile fields onto the existing stored profile in saveProfile() rather than replacing it outright, or explicitly carry forward existing identity fields when the caller's update omits them."
+    },
+    {
+      "id": "CR-003",
+      "triage": "patch",
+      "severity": "major",
+      "problem": "src/migrations/008-isolate-global-profile-identity.migration.ts uses `as any` casts on every identity-key read/write ((config.workspace as any)?.[key], (profile as any)[key], (sharedWorkspace as any)[key], (workspace as any)[key]), bypassing the WorkspaceConfig/ProviderProfile type system in a file whose entire job is correctly relocating typed fields.",
+      "impact": "Violates the project's documented 'no any' coding standard (AGENTS.md Coding Standards; code-quality.md). A future drift between the migration's independent IDENTITY_KEYS literal and the real WorkspaceConfig/ProviderProfile shape would not be caught by the compiler, silently miscopying a key.",
+      "recommendation": "Type `IDENTITY_KEYS` as `(keyof WorkspaceConfig & keyof ProviderProfile)[]` (or equivalent) and access fields through properly typed intermediate variables instead of `as any`."
+    }
+  ]
+}

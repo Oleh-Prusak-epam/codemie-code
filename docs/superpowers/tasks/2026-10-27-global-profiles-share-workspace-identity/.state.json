@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "flow": "sdlc-light",
+  "slug": "global-profiles-share-workspace-identity",
+  "branch": "EPMCDME-15411_global-profile-identity-isolation",
+  "phase": "main",
+  "started_at": "2026-10-27T13:34:35Z"
+}
