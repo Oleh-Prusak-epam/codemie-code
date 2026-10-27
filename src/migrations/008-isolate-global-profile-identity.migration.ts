@@ -6,10 +6,28 @@ import type { MultiProviderConfig, ProviderProfile, WorkspaceConfig } from '../e
 /**
  * CodeMie connectivity identity — isolated per global profile so switching
  * between global profiles never leaks one profile's identity onto another
- * (EPMCDME-15411). Kept as an independent literal here, mirroring migration
- * 007, so the migration has no runtime dependency on ConfigLoader internals.
+ * (EPMCDME-15411). Handled as three explicit fields rather than a generic
+ * keyof loop, mirroring migration 007's independence from ConfigLoader
+ * internals: a generic loop over a mixed-type key union (codeMieIntegration
+ * is an object, the other two are strings) cannot stay type-safe without an
+ * `any` escape hatch, so each field is copied/stripped by name instead.
  */
-const IDENTITY_KEYS: (keyof WorkspaceConfig)[] = ['codeMieUrl', 'codeMieProject', 'codeMieIntegration'];
+function hasIdentity(source: WorkspaceConfig | ProviderProfile): boolean {
+  return source.codeMieUrl !== undefined || source.codeMieProject !== undefined || source.codeMieIntegration !== undefined;
+}
+
+function withIdentityFrom(profile: ProviderProfile, source: WorkspaceConfig): ProviderProfile {
+  const cloned: ProviderProfile = { ...profile };
+  if (source.codeMieUrl !== undefined) cloned.codeMieUrl = source.codeMieUrl;
+  if (source.codeMieProject !== undefined) cloned.codeMieProject = source.codeMieProject;
+  if (source.codeMieIntegration !== undefined) cloned.codeMieIntegration = source.codeMieIntegration;
+  return cloned;
+}
+
+function withoutIdentity(workspace: WorkspaceConfig): WorkspaceConfig {
+  const { codeMieUrl: _codeMieUrl, codeMieProject: _codeMieProject, codeMieIntegration: _codeMieIntegration, ...rest } = workspace;
+  return rest;
+}
 
 class IsolateGlobalProfileIdentityMigration implements Migration {
   id = '008-isolate-global-profile-identity';
@@ -32,34 +50,15 @@ class IsolateGlobalProfileIdentityMigration implements Migration {
   }
 
   migrate(config: MultiProviderConfig): MultiProviderConfig {
-    const hasIdentity = IDENTITY_KEYS.some(key => (config.workspace as any)?.[key] !== undefined);
-    if (!hasIdentity) return config;
+    const sharedWorkspace: WorkspaceConfig = config.workspace ?? {};
+    if (!hasIdentity(sharedWorkspace)) return config;
 
-    const sharedWorkspace = config.workspace as WorkspaceConfig;
     const profiles: Record<string, ProviderProfile> = {};
     for (const [name, profile] of Object.entries(config.profiles ?? {})) {
-      const definesOwnIdentity = IDENTITY_KEYS.some(key => (profile as any)[key] !== undefined);
-      if (definesOwnIdentity) {
-        profiles[name] = profile;
-        continue;
-      }
-
-      const cloned: ProviderProfile = { ...profile };
-      for (const key of IDENTITY_KEYS) {
-        const value = (sharedWorkspace as any)[key];
-        if (value !== undefined) {
-          (cloned as any)[key] = value;
-        }
-      }
-      profiles[name] = cloned;
+      profiles[name] = hasIdentity(profile) ? profile : withIdentityFrom(profile, sharedWorkspace);
     }
 
-    const workspace: WorkspaceConfig = { ...sharedWorkspace };
-    for (const key of IDENTITY_KEYS) {
-      delete (workspace as any)[key];
-    }
-
-    return { ...config, profiles, workspace };
+    return { ...config, profiles, workspace: withoutIdentity(sharedWorkspace) };
   }
 }
 

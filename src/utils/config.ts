@@ -681,7 +681,14 @@ export class ConfigLoader {
     );
 
     (profileFields as any).name = profileName;
-    config.profiles[profileName] = profileFields as ProviderProfile;
+    // Merge onto the existing stored profile rather than replacing it outright
+    // (EPMCDME-15411): identity now lives directly on the profile, so a caller
+    // that updates unrelated fields (e.g. just `model`) without resupplying
+    // codeMieUrl/codeMieProject/codeMieIntegration must not silently wipe them.
+    config.profiles[profileName] = {
+      ...config.profiles[profileName],
+      ...profileFields
+    } as ProviderProfile;
 
     if (Object.keys(this.removeUndefined(workspaceFields)).length > 0) {
       config.workspace = { ...config.workspace, ...workspaceFields };

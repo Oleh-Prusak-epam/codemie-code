@@ -411,6 +411,32 @@ describe('ConfigLoader - Project-Level Configuration', () => {
       expect(config.workspace?.claudeAutocompactPct).toBe(85);
     });
 
+    it('saveProfile merges onto the existing profile instead of replacing it, so an update that omits identity does not wipe previously saved identity (EPMCDME-15411)', async () => {
+      await ConfigLoader.saveProfile('p1', {
+        provider: 'ai-run-sso',
+        codeMieUrl: 'https://x',
+        codeMieProject: 'proj',
+        baseUrl: 'https://x/code-assistant-api',
+        model: 'claude-sonnet-4-6'
+      } as any);
+
+      // A later update — e.g. re-running setup to change just the model — omits
+      // the identity fields entirely, the way a caller naturally would if it
+      // isn't re-collecting CodeMie URL/project on every update.
+      await ConfigLoader.saveProfile('p1', {
+        provider: 'ai-run-sso',
+        baseUrl: 'https://x/code-assistant-api',
+        model: 'claude-opus-5-5'
+      } as any);
+
+      const content = await fs.readFile(GLOBAL_CONFIG_PATH, 'utf-8');
+      const config: MultiProviderConfig = JSON.parse(content);
+
+      expect((config.profiles.p1 as any).codeMieUrl).toBe('https://x');
+      expect((config.profiles.p1 as any).codeMieProject).toBe('proj');
+      expect(config.profiles.p1.model).toBe('claude-opus-5-5');
+    });
+
     it('initProjectConfig routes workspace fields into the local scope workspace, not into profiles[name]', async () => {
       const workingDir = path.join(TEST_DIR, 'project');
       await ConfigLoader.initProjectConfig(workingDir, {
@@ -615,6 +641,69 @@ describe('ConfigLoader - workspace resolution and project-only composition', () 
 
       expect(cfg.codeMieProject).toBe('global-proj');
       expect(cfg.codeMieUrl).toBe('https://global.example.com');
+    });
+
+    it('falls back to the matching global profile\'s own identity when the global workspace no longer carries it (post migration 008, EPMCDME-15411)', async () => {
+      // Post-008 shape: identity lives on the global profile itself, not on the
+      // shared global workspace. A local profile with no local workspace of its
+      // own must still resolve identity via this path, not go empty.
+      await writeGlobal('personal-anthropic', {
+        'personal-anthropic': {
+          provider: 'anthropic-subscription',
+          codeMieUrl: 'https://global.example.com',
+          codeMieProject: 'global-proj',
+          baseUrl: 'https://api.anthropic.com',
+          model: 'claude-sonnet-4-6',
+          name: 'personal-anthropic'
+        }
+      });
+
+      await writeLocal('personal-anthropic', {
+        'personal-anthropic': {
+          provider: 'anthropic-subscription',
+          baseUrl: 'https://api.anthropic.com',
+          model: 'claude-sonnet-4-6',
+          name: 'personal-anthropic'
+        }
+      });
+
+      const cfg = await ConfigLoader.load(path.join(TEST_DIR, 'project'));
+
+      expect(cfg.codeMieProject).toBe('global-proj');
+      expect(cfg.codeMieUrl).toBe('https://global.example.com');
+    });
+
+    it('resolves no identity (not a crash, not a stale leaked value) for a purely local-only profile name with no global counterpart and no own identity', async () => {
+      // 'local-only-profile' exists only in the local config — it has no matching
+      // key in global `profiles`, so migration 008 never had anything to clone onto
+      // it, and it never defines codeMieUrl/codeMieProject itself either. This is a
+      // narrow, pre-existing edge case (EPMCDME-15411): before this fix it would
+      // have read whatever was in the shared global workspace — exactly the kind of
+      // cross-profile identity leak this ticket removes. The correct outcome is no
+      // identity at all, not a crash and not another profile's leaked value.
+      await writeGlobal('unrelated-global', {
+        'unrelated-global': {
+          provider: 'ai-run-sso',
+          codeMieUrl: 'https://unrelated.example.com',
+          codeMieProject: 'unrelated-proj',
+          baseUrl: 'https://unrelated.example.com/code-assistant-api',
+          model: 'claude-sonnet-4-6',
+          name: 'unrelated-global'
+        }
+      });
+      await writeLocal('local-only-profile', {
+        'local-only-profile': {
+          provider: 'anthropic-subscription',
+          baseUrl: 'https://api.anthropic.com',
+          model: 'claude-sonnet-4-6',
+          name: 'local-only-profile'
+        }
+      });
+
+      const cfg = await ConfigLoader.load(path.join(TEST_DIR, 'project'));
+
+      expect(cfg.codeMieUrl).toBeUndefined();
+      expect(cfg.codeMieProject).toBeUndefined();
     });
 
     it('does not crash and falls back to the global workspace when the local config has an explicit "workspace": null', async () => {
