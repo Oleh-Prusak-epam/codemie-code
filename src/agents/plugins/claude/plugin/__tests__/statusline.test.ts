@@ -326,13 +326,27 @@ describe('resolveBudget', () => {
     expect(result).toEqual({ budget: null, budgetError: null });
   });
 
-  it('skips silently when codeMieUrl/userEmail only exist on the profile — migration 006 moved them to workspace/top-level', async () => {
+  it('resolves codeMieUrl from the active profile itself, not from the shared workspace (EPMCDME-15411)', async () => {
     const readFile = readFileFor({
       activeProfile: 'default',
-      // Pre-fix (stale) shape: codeMieUrl/userEmail stranded on the profile with no
-      // top-level `workspace`/`userEmail`. Must not be read from the profile object —
-      // regression test for the statusline reading raw profile fields post-migration.
-      profiles: { default: { codeMieUrl: 'https://x', baseUrl: 'https://x/api', userEmail: 'me@x.com' } },
+      userEmail: 'me@x.com',
+      // No top-level `workspace.codeMieUrl` at all — each global profile now
+      // carries its own codeMieUrl directly, so this must still resolve.
+      profiles: { default: { codeMieUrl: 'https://x', baseUrl: 'https://x/api' } },
+    });
+    const getAuthHeadersImpl = vi.fn().mockResolvedValue(null);
+    const result = await resolveBudget({ readFile, writeFile: vi.fn(), fetchImpl: vi.fn(), getAuthHeadersImpl });
+    expect(result).toEqual({ budget: null, budgetError: 'reauthenticate' }); // got past the codeMieUrl check, reached auth
+  });
+
+  it('skips silently when a stale shared workspace.codeMieUrl exists but the active profile has none', async () => {
+    // A leftover shared workspace value (pre EPMCDME-15411 fix / pre migration 008)
+    // must not be used as a fallback — only the profile's own codeMieUrl counts.
+    const readFile = readFileFor({
+      activeProfile: 'default',
+      userEmail: 'me@x.com',
+      workspace: { codeMieUrl: 'https://stale-shared.example.com' },
+      profiles: { default: { baseUrl: 'https://x/api' } },
     });
     const result = await resolveBudget({ readFile, writeFile: vi.fn(), fetchImpl: vi.fn(), getAuthHeadersImpl: vi.fn() });
     expect(result).toEqual({ budget: null, budgetError: null });
@@ -342,8 +356,7 @@ describe('resolveBudget', () => {
     const readFile = readFileFor({
         activeProfile: 'default',
         userEmail: 'me@x.com',
-        workspace: { codeMieUrl: 'https://x' },
-        profiles: { default: { baseUrl: 'https://x/api' } },
+        profiles: { default: { codeMieUrl: 'https://x', baseUrl: 'https://x/api' } },
       });
     const getAuthHeadersImpl = vi.fn().mockResolvedValue(null);
     const result = await resolveBudget({ readFile, writeFile: vi.fn(), fetchImpl: vi.fn(), getAuthHeadersImpl });
@@ -354,8 +367,7 @@ describe('resolveBudget', () => {
     const readFile = readFileFor({
         activeProfile: 'default',
         userEmail: 'me@x.com',
-        workspace: { codeMieUrl: 'https://x' },
-        profiles: { default: { baseUrl: 'https://x/api' } },
+        profiles: { default: { codeMieUrl: 'https://x', baseUrl: 'https://x/api' } },
       });
     const getAuthHeadersImpl = vi.fn().mockResolvedValue({ cookie: 'a=b' });
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 500 });
@@ -367,8 +379,7 @@ describe('resolveBudget', () => {
     const readFile = readFileFor({
         activeProfile: 'default',
         userEmail: 'me@x.com',
-        workspace: { codeMieUrl: 'https://x' },
-        profiles: { default: { baseUrl: 'https://x/api' } },
+        profiles: { default: { codeMieUrl: 'https://x', baseUrl: 'https://x/api' } },
       });
     const getAuthHeadersImpl = vi.fn().mockResolvedValue({ cookie: 'a=b' });
     const fetchImpl = vi.fn().mockResolvedValue({
@@ -386,8 +397,7 @@ describe('resolveBudget', () => {
   const CONFIG = {
     activeProfile: 'default',
     userEmail: 'me@x.com',
-    workspace: { codeMieUrl: 'https://x' },
-    profiles: { default: { baseUrl: 'https://x/api' } },
+    profiles: { default: { codeMieUrl: 'https://x', baseUrl: 'https://x/api' } },
   };
 
   it('returns the fresh cached value without touching the network when cache is fresh', async () => {
@@ -421,8 +431,7 @@ describe('resolveBudget', () => {
     const readFile = readFileFor({
         activeProfile: 'default',
         userEmail: 'me@x.com',
-        workspace: { codeMieUrl: 'https://x' },
-        profiles: { default: { baseUrl: 'https://x/api' } },
+        profiles: { default: { codeMieUrl: 'https://x', baseUrl: 'https://x/api' } },
       });
     const getAuthHeadersImpl = vi.fn().mockRejectedValue(new Error('keychain locked'));
     const result = await resolveBudget({ readFile, writeFile: vi.fn(), fetchImpl: vi.fn(), getAuthHeadersImpl });

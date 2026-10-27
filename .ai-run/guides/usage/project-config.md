@@ -147,14 +147,18 @@ Keep global config with provider/model. Each repo's local config sets only `code
 
 ### Team project context with a selected provider profile
 
-`codeMieUrl`, `codeMieProject`, and `codeMieIntegration` come from the workspace of the scope
-the profile in use belongs to. A local profile (defined in `.codemie/codemie-cli.config.json`)
+`codeMieUrl`, `codeMieProject`, and `codeMieIntegration` resolve differently depending on the
+scope of the profile in use. A local profile (defined in `.codemie/codemie-cli.config.json`)
 uses the local workspace, falling back to the global one when the local config has none. A
-global profile always uses the global workspace, even inside a repository with a local config.
+**global** profile resolves its own identity directly from the profile itself — each global
+profile stores its own `codeMieUrl`/`codeMieProject`/`codeMieIntegration`, so switching between
+global profiles never leaks one profile's identity onto another (EPMCDME-15411). Only non-identity
+workspace fields (`hooks`, `plugins`, `assistants`, `skillsSearchUrl`, `claudeAutocompactPct`,
+`metrics`) remain scope-level shared across global profiles.
 
 ```bash
 codemie-claude                      # repo's local profile: repo's CodeMie URL and project
-codemie-claude --profile anthropic  # global profile: global CodeMie URL and project
+codemie-claude --profile anthropic  # global profile: that profile's own CodeMie URL and project
 ```
 
 ### Which CodeMie URL is used
