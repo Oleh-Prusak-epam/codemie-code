@@ -626,16 +626,13 @@ export class ConfigLoader {
    * Non-identity WorkspaceConfig keys. Unlike IDENTITY_KEYS, saveProfile() (a
    * global-scope-only method) routes these into the shared global workspace —
    * identity fields stay on the profile itself so each global profile resolves
-   * its own CodeMie identity independently (EPMCDME-15411).
+   * its own CodeMie identity independently (EPMCDME-15411). Derived from
+   * WORKSPACE_KEYS minus IDENTITY_KEYS rather than hand-duplicated, so a future
+   * field added to one list can never silently drift out of sync with the other.
    */
-  private static readonly NON_IDENTITY_WORKSPACE_KEYS: (keyof WorkspaceConfig)[] = [
-    'hooks',
-    'plugins',
-    'assistants',
-    'skillsSearchUrl',
-    'claudeAutocompactPct',
-    'metrics'
-  ];
+  private static readonly NON_IDENTITY_WORKSPACE_KEYS: (keyof WorkspaceConfig)[] = ConfigLoader.WORKSPACE_KEYS.filter(
+    key => !ConfigLoader.IDENTITY_KEYS.includes(key)
+  );
 
   /**
    * Partition a profile-shaped input into its provider-identity half and its
@@ -681,12 +678,24 @@ export class ConfigLoader {
     );
 
     (profileFields as any).name = profileName;
-    // Merge onto the existing stored profile rather than replacing it outright
+    // Full-replace semantics stay intact for provider-specific fields (switching
+    // provider must drop the old provider's leftover fields, e.g. authMethod/
+    // jwtConfig when moving from jwt to sso) — but the identity trio is carried
+    // forward from the existing profile when the caller's update omits it
     // (EPMCDME-15411): identity now lives directly on the profile, so a caller
     // that updates unrelated fields (e.g. just `model`) without resupplying
     // codeMieUrl/codeMieProject/codeMieIntegration must not silently wipe them.
+    const existingProfile = config.profiles[profileName];
+    const preservedIdentity: Partial<ProviderProfile> = {};
+    if (existingProfile) {
+      for (const key of this.IDENTITY_KEYS) {
+        if ((profileFields as any)[key] === undefined && (existingProfile as any)[key] !== undefined) {
+          (preservedIdentity as any)[key] = (existingProfile as any)[key];
+        }
+      }
+    }
     config.profiles[profileName] = {
-      ...config.profiles[profileName],
+      ...preservedIdentity,
       ...profileFields
     } as ProviderProfile;
 

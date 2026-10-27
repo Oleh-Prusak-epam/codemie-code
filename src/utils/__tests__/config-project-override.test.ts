@@ -437,6 +437,37 @@ describe('ConfigLoader - Project-Level Configuration', () => {
       expect(config.profiles.p1.model).toBe('claude-opus-5-5');
     });
 
+    it('saveProfile does not leak stale provider-specific fields across a provider switch — only the identity trio carries forward (EPMCDME-15411)', async () => {
+      // jwt provider's buildConfig() sets authMethod/jwtConfig; sso's does not.
+      await ConfigLoader.saveProfile('work', {
+        provider: 'bearer-auth',
+        codeMieUrl: 'https://x',
+        baseUrl: 'https://x/code-assistant-api',
+        model: 'claude-sonnet-4-6',
+        authMethod: 'jwt',
+        jwtConfig: { tokenEnvVar: 'MY_TOKEN' }
+      } as any);
+
+      // User reconfigures the same profile name to a different provider via
+      // `codemie setup` → Update. sso's buildConfig() never emits
+      // authMethod/jwtConfig at all — they must not survive the switch.
+      await ConfigLoader.saveProfile('work', {
+        provider: 'ai-run-sso',
+        codeMieUrl: 'https://y',
+        apiKey: 'sso-provided',
+        baseUrl: 'https://y/code-assistant-api',
+        model: 'claude-sonnet-4-6'
+      } as any);
+
+      const content = await fs.readFile(GLOBAL_CONFIG_PATH, 'utf-8');
+      const config: MultiProviderConfig = JSON.parse(content);
+
+      expect(config.profiles.work.provider).toBe('ai-run-sso');
+      expect((config.profiles.work as any).authMethod).toBeUndefined();
+      expect((config.profiles.work as any).jwtConfig).toBeUndefined();
+      expect((config.profiles.work as any).codeMieUrl).toBe('https://y');
+    });
+
     it('initProjectConfig routes workspace fields into the local scope workspace, not into profiles[name]', async () => {
       const workingDir = path.join(TEST_DIR, 'project');
       await ConfigLoader.initProjectConfig(workingDir, {

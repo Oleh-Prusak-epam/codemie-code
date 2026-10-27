@@ -16,11 +16,15 @@ function hasIdentity(source: WorkspaceConfig | ProviderProfile): boolean {
   return source.codeMieUrl !== undefined || source.codeMieProject !== undefined || source.codeMieIntegration !== undefined;
 }
 
+// Fills only the identity fields the profile is missing — a profile that
+// already defines e.g. its own codeMieProject but not codeMieUrl must still
+// receive codeMieUrl from the shared workspace, not be skipped wholesale
+// (a per-field gap-fill, not an all-or-nothing clone).
 function withIdentityFrom(profile: ProviderProfile, source: WorkspaceConfig): ProviderProfile {
   const cloned: ProviderProfile = { ...profile };
-  if (source.codeMieUrl !== undefined) cloned.codeMieUrl = source.codeMieUrl;
-  if (source.codeMieProject !== undefined) cloned.codeMieProject = source.codeMieProject;
-  if (source.codeMieIntegration !== undefined) cloned.codeMieIntegration = source.codeMieIntegration;
+  if (cloned.codeMieUrl === undefined && source.codeMieUrl !== undefined) cloned.codeMieUrl = source.codeMieUrl;
+  if (cloned.codeMieProject === undefined && source.codeMieProject !== undefined) cloned.codeMieProject = source.codeMieProject;
+  if (cloned.codeMieIntegration === undefined && source.codeMieIntegration !== undefined) cloned.codeMieIntegration = source.codeMieIntegration;
   return cloned;
 }
 
@@ -55,7 +59,7 @@ class IsolateGlobalProfileIdentityMigration implements Migration {
 
     const profiles: Record<string, ProviderProfile> = {};
     for (const [name, profile] of Object.entries(config.profiles ?? {})) {
-      profiles[name] = hasIdentity(profile) ? profile : withIdentityFrom(profile, sharedWorkspace);
+      profiles[name] = withIdentityFrom(profile, sharedWorkspace);
     }
 
     return { ...config, profiles, workspace: withoutIdentity(sharedWorkspace) };
