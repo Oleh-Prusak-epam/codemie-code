@@ -12,41 +12,40 @@ function hasIdentity(source: WorkspaceConfig | ProviderProfile): boolean {
   return source.codeMieUrl !== undefined || source.codeMieProject !== undefined || source.codeMieIntegration !== undefined;
 }
 
-// Per-field gap-fill, not all-or-nothing: a profile with its own
-// codeMieProject but no codeMieUrl still gets codeMieUrl filled in.
-// canUseSharedIdentity() (shared with the read-time fallback in config.ts —
-// see its own doc comment) refuses only on positive evidence the shared value
-// belongs to a different profile/environment; a vendor-subscription profile or
-// a lone split-host ai-run-sso profile is always allowed.
+// All-or-nothing per profile, not per-field: a profile that already defines ANY
+// of its own identity fields gets none of the shared ones. Gap-filling only the
+// missing fields could pair this profile's own (correct) field with a shared
+// field that belongs to a different environment — the shared workspace is a
+// single object that may have been left over from whichever profile saved last,
+// not necessarily this one's. canUseSharedIdentity() (shared with the read-time
+// fallback in config.ts — see its own doc comment) additionally refuses on
+// positive evidence the shared value belongs to a different profile/environment;
+// a vendor-subscription profile or a lone split-host ai-run-sso profile is always
+// allowed by that check.
 function withIdentityFrom(
   profile: ProviderProfile,
   source: WorkspaceConfig,
   allProfiles: Record<string, ProviderProfile>,
   ownName: string
 ): { profile: ProviderProfile; changed: boolean } {
-  if (!canUseSharedIdentity(profile, allProfiles, ownName, source.codeMieUrl)) {
+  if (hasIdentity(profile) || !canUseSharedIdentity(profile, allProfiles, ownName, source.codeMieUrl)) {
     return { profile, changed: false };
   }
   const cloned: ProviderProfile = { ...profile };
   let changed = false;
-  if (cloned.codeMieUrl === undefined && source.codeMieUrl !== undefined) {
+  if (source.codeMieUrl !== undefined) {
     cloned.codeMieUrl = source.codeMieUrl;
     changed = true;
   }
-  if (cloned.codeMieProject === undefined && source.codeMieProject !== undefined) {
+  if (source.codeMieProject !== undefined) {
     cloned.codeMieProject = source.codeMieProject;
     changed = true;
   }
-  if (cloned.codeMieIntegration === undefined && source.codeMieIntegration !== undefined) {
+  if (source.codeMieIntegration !== undefined) {
     cloned.codeMieIntegration = source.codeMieIntegration;
     changed = true;
   }
   return { profile: cloned, changed };
-}
-
-function withoutIdentity(workspace: WorkspaceConfig): WorkspaceConfig {
-  const { codeMieUrl: _codeMieUrl, codeMieProject: _codeMieProject, codeMieIntegration: _codeMieIntegration, ...rest } = workspace;
-  return rest;
 }
 
 class IsolateGlobalProfileIdentityMigration implements Migration {
@@ -83,11 +82,17 @@ class IsolateGlobalProfileIdentityMigration implements Migration {
     }
 
     // Nobody actually received the shared identity (every profile already had
-    // its own, or every CodeMie-platform profile was refused) — keep workspace
-    // rather than deleting data nobody got a chance to claim.
+    // its own, or every CodeMie-platform profile was refused) — nothing changed.
     if (!anyChanged) return config;
 
-    return { ...config, profiles, workspace: withoutIdentity(sharedWorkspace) };
+    // The shared workspace identity is NEVER stripped, even after cloning it onto
+    // every eligible profile: it remains the permanent ambient fallback for local
+    // profiles with no identity of their own (AC5 — their behavior must not
+    // regress) and for any profile this migration could not or did not clone it
+    // onto. Global profiles that did clone their own copy above always resolve it
+    // first (see resolveProfileWorkspace() / canUseSharedIdentity() in config.ts),
+    // so this leftover value is inert for them once they own their own copy.
+    return { ...config, profiles };
   }
 }
 

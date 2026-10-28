@@ -36,10 +36,14 @@ function originOf(url: string): string | undefined {
 }
 
 /**
- * Whether a profile with no identity of its own may still inherit a shared
- * (pre-migration-008) `codeMieUrl`/`codeMieProject`/`codeMieIntegration`.
- * Refuses only on positive evidence the shared value belongs to a *different*
- * profile's environment — never merely because origins differ, which is also
+ * Whether a profile with no identity of its own may still inherit the shared
+ * `codeMieUrl`/`codeMieProject`/`codeMieIntegration` left in the global
+ * workspace by migration 008 (never stripped — see that migration's own
+ * comment) — covers a global profile that predates/was refused by the
+ * migration, and a local profile with no identity of its own (see
+ * resolveProfileWorkspace()). Refuses only on positive evidence the shared
+ * value belongs to a *different* profile's environment — never merely
+ * because origins differ, which is also
  * true by design for a vendor-subscription profile (baseUrl is never the
  * CodeMie backend) and for `ai-run-sso` with a split API host (baseUrl's
  * origin need not match codeMieUrl's — see sso.auth.ts's VITE_API_URL
@@ -279,13 +283,18 @@ export class ConfigLoader {
    * (merged in earlier by load()/loadWithSources()), not from here — but a
    * profile that predates migration 008 (e.g. a `bin/codemie-*` launcher ran
    * before `bin/codemie.js` ever had a chance to migrate it) has none of its
-   * own yet, so this falls back to the shared workspace value per key rather
-   * than dropping identity entirely.
+   * own yet, so this falls back to the shared workspace value. The fallback is
+   * all-or-nothing per profile, not per key: if the profile already owns ANY of
+   * the three fields (via its own stored data or the caller-supplied
+   * profileIdentity below), none of its missing fields are filled from the
+   * shared workspace — the shared object may be a leftover from a different
+   * profile's environment, and gap-filling only the missing ones could pair
+   * this profile's own field with another environment's.
    *
    * @param workingDir - Directory whose local config is considered
    * @param isLocalProfile - Whether the profile in use is defined in the local config
    * @param profileIdentity - Identity already resolved from the global profile
-   *   itself, if any; a key present here always wins over the shared value
+   *   itself, if any; any key present here disables the shared fallback entirely
    * @param profileName - Name of the global profile in use, used to look up its
    *   own `baseUrl`/`provider` and its siblings for canUseSharedIdentity(). The
    *   fallback source is always the GLOBAL shared workspace (never a repo-local
@@ -312,14 +321,20 @@ export class ConfigLoader {
       (globalWorkspace as any)?.codeMieUrl
     );
 
+    // All-or-nothing, not per-key: if the profile already owns ANY identity field —
+    // via the caller-supplied profileIdentity (e.g. listProfiles() looks it up by
+    // name) or via its own stored data — none of its missing fields are filled from
+    // the shared workspace. Gap-filling only the missing ones could pair this
+    // profile's own (correct) field with a shared field left over from whichever
+    // profile saved last, attributing usage to the wrong project/integration.
+    const ownHasAnyIdentity = this.IDENTITY_KEYS.some(
+      (key) => (profileIdentity as any)[key] !== undefined || (ownProfile as any)[key] !== undefined
+    );
+
     const result: Record<string, unknown> = { ...workspace };
     for (const key of this.IDENTITY_KEYS) {
       delete result[key];
-      // Trust the profile's own stored identity even when the caller passed an
-      // empty/incomplete profileIdentity (e.g. listProfiles() looks it up by name
-      // alone) — never let the shared-workspace fallback below clobber a value
-      // the profile already owns.
-      if ((profileIdentity as any)[key] !== undefined || (ownProfile as any)[key] !== undefined || !canUseShared) {
+      if (ownHasAnyIdentity || !canUseShared) {
         continue;
       }
       const sharedValue = (globalWorkspace as any)?.[key];

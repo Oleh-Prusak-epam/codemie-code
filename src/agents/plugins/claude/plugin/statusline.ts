@@ -762,11 +762,13 @@ export async function resolveBudget({
   const { baseUrl } = profile ?? {};
   // Per-profile identity: each profile resolves its own CodeMie URL. A profile that
   // predates migration 008 (e.g. this statusline ran before `bin/codemie.js` ever had
-  // a chance to migrate it — only that launcher runs pending migrations) has none of
-  // its own yet, so fall back to the shared workspace value — migration 008 always
-  // strips it once it runs, so a non-empty value here can only mean "not yet
-  // migrated", never a post-migration leftover. Guarded by canUseSharedIdentity(),
-  // same as the migration and the read-time fallback in src/utils/config.ts.
+  // a chance to migrate it — only that launcher runs pending migrations), or that
+  // migration 008 refused to clone the identity onto (vendor-subscription providers,
+  // split-host ai-run-sso with no sibling evidence), has none of its own yet, so fall
+  // back to the shared workspace value — migration 008 never strips it, precisely so
+  // this fallback (and the equivalent one for local profiles) keeps working forever,
+  // not just pre-migration. Guarded by canUseSharedIdentity(), same as the migration
+  // and the read-time fallback in src/utils/config.ts.
   let codeMieUrl = profile?.codeMieUrl;
   if (!codeMieUrl && config.workspace?.codeMieUrl
     && canUseSharedIdentity(profile, config.profiles, profileName, config.workspace.codeMieUrl)) {

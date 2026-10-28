@@ -6,7 +6,7 @@ const migration = new IsolateGlobalProfileIdentityMigration();
 const migrate = (config: any): MultiProviderConfig => migration.migrate(config);
 
 describe('IsolateGlobalProfileIdentityMigration', () => {
-  it('clones the shared workspace identity trio onto every global profile and strips it from workspace', () => {
+  it('clones the shared workspace identity trio onto every global profile while keeping it in workspace as a permanent fallback', () => {
     const config: any = {
       version: 2,
       activeProfile: 'env-a',
@@ -27,8 +27,11 @@ describe('IsolateGlobalProfileIdentityMigration', () => {
     expect((result.profiles['env-a'] as any).codeMieProject).toBe('shared-proj');
     expect((result.profiles['env-b'] as any).codeMieUrl).toBe('https://shared.example.com');
     expect((result.profiles['env-b'] as any).codeMieProject).toBe('shared-proj');
-    expect(result.workspace?.codeMieUrl).toBeUndefined();
-    expect(result.workspace?.codeMieProject).toBeUndefined();
+    // Never stripped: it remains the historical ambient fallback for local profiles
+    // with no identity of their own (AC5) and for any profile that could not claim
+    // it. Global profiles that cloned their own copy above always resolve it first.
+    expect(result.workspace?.codeMieUrl).toBe('https://shared.example.com');
+    expect(result.workspace?.codeMieProject).toBe('shared-proj');
     expect(result.workspace?.hooks).toEqual({ PreToolUse: [] });
   });
 
@@ -47,14 +50,14 @@ describe('IsolateGlobalProfileIdentityMigration', () => {
     expect((result.profiles['env-a'] as any).codeMieUrl).toBe('https://already-own.example.com');
   });
 
-  it('fills only the missing identity fields on a profile that already defines some of its own, without dropping shared fields for other profiles', () => {
+  it('treats the identity trio as a unit: a profile that already defines ANY of its own identity fields gets none of the shared ones, to avoid mixing environments', () => {
     const config: any = {
       version: 2,
       activeProfile: 'env-a',
       profiles: {
-        // Already has its own codeMieProject but no codeMieUrl — a prior
-        // partial-identity skip would leave codeMieUrl unrecoverable once the
-        // shared workspace value is stripped below.
+        // Already has its own codeMieProject but no codeMieUrl. Gap-filling codeMieUrl
+        // from the shared workspace here would risk pairing this profile's own project
+        // with a codeMieUrl from a different (shared) environment — skip the whole trio.
         'env-a': { provider: 'ai-run-sso', codeMieProject: 'env-a-own-proj' },
         'env-b': { provider: 'ai-run-sso' }
       },
@@ -66,11 +69,14 @@ describe('IsolateGlobalProfileIdentityMigration', () => {
 
     const result = migrate(config);
 
-    expect((result.profiles['env-a'] as any).codeMieUrl).toBe('https://shared.example.com');
+    expect((result.profiles['env-a'] as any).codeMieUrl).toBeUndefined();
     expect((result.profiles['env-a'] as any).codeMieProject).toBe('env-a-own-proj');
     expect((result.profiles['env-b'] as any).codeMieUrl).toBe('https://shared.example.com');
     expect((result.profiles['env-b'] as any).codeMieProject).toBe('shared-proj');
-    expect(result.workspace?.codeMieUrl).toBeUndefined();
+    // Still never stripped, even though env-a's own partial identity means it will
+    // never read this value either (same atomic-trio rule applies at read time) —
+    // other profiles/local configs with no identity of their own still depend on it.
+    expect(result.workspace?.codeMieUrl).toBe('https://shared.example.com');
   });
 
   it('skips the copy for a profile whose baseUrl origin does not match the shared codeMieUrl, to avoid pinning another environment\'s project onto it', () => {
@@ -111,7 +117,7 @@ describe('IsolateGlobalProfileIdentityMigration', () => {
 
     expect((result.profiles['anthropic-sub'] as any).codeMieUrl).toBe('https://codemie.lab.epam.com');
     expect((result.profiles['anthropic-sub'] as any).codeMieProject).toBe('epm-cdme');
-    expect(result.workspace?.codeMieUrl).toBeUndefined();
+    expect(result.workspace?.codeMieUrl).toBe('https://codemie.lab.epam.com');
   });
 
   it('clones the shared identity onto a lone ai-run-sso profile with a split API host, when no sibling claims the shared origin', () => {
@@ -128,7 +134,7 @@ describe('IsolateGlobalProfileIdentityMigration', () => {
 
     expect((result.profiles['split-host'] as any).codeMieUrl).toBe('https://split-host.example.com');
     expect((result.profiles['split-host'] as any).codeMieProject).toBe('split-host-proj');
-    expect(result.workspace?.codeMieUrl).toBeUndefined();
+    expect(result.workspace?.codeMieUrl).toBe('https://split-host.example.com');
   });
 
   it('keeps workspace when every profile already has its own identity or every candidate was refused, so nobody loses data nobody claimed', () => {

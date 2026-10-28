@@ -10,6 +10,7 @@ import * as path from 'path';
 import { ConfigLoader } from '../config.js';
 import type { MultiProviderConfig, CodeMieIntegrationInfo } from '../../env/types.js';
 import * as paths from '../paths.js';
+import { IsolateGlobalProfileIdentityMigration } from '../../migrations/008-isolate-global-profile-identity.migration.js';
 
 // Test utilities
 const TEST_DIR = path.join(process.cwd(), 'tmp-test-config');
@@ -755,6 +756,73 @@ describe('ConfigLoader - workspace resolution and project-only composition', () 
 
       expect(cfg.codeMieUrl).toBeUndefined();
       expect(cfg.codeMieProject).toBeUndefined();
+    });
+
+    it('falls back to the shared global workspace identity for a local-only profile with no global counterpart, even after migration 008 has actually run (AC5: existing local profile behavior is not regressed)', async () => {
+      // No same-named global profile exists for 'local-only-profile' to borrow identity
+      // from by name — the ONLY possible source is the shared global workspace object.
+      // Migration 008 keeps that value in place rather than stripping it, specifically so
+      // this historical ambient-inheritance contract for local profiles keeps working —
+      // run the real migration (not just hand-write the post-migration shape) so this
+      // test actually exercises migrate()'s decision not to strip, not just load()'s
+      // ability to read a value that happens to already be there.
+      await writeGlobal('unrelated-global', {
+        'unrelated-global': {
+          provider: 'ai-run-sso',
+          baseUrl: 'https://unrelated.example.com/code-assistant-api',
+          model: 'claude-sonnet-4-6',
+          name: 'unrelated-global'
+        }
+      });
+      const globalRaw = JSON.parse(await fs.readFile(GLOBAL_CONFIG_PATH, 'utf-8'));
+      globalRaw.workspace = { codeMieUrl: 'https://unrelated.example.com', codeMieProject: 'shared-proj' };
+      await fs.writeFile(GLOBAL_CONFIG_PATH, JSON.stringify(globalRaw, null, 2));
+
+      const migration = new IsolateGlobalProfileIdentityMigration();
+      await migration.up();
+
+      await writeLocal('local-only-profile', {
+        'local-only-profile': {
+          provider: 'anthropic-subscription',
+          baseUrl: 'https://api.anthropic.com',
+          model: 'claude-sonnet-4-6',
+          name: 'local-only-profile'
+        }
+      });
+
+      const cfg = await ConfigLoader.load(path.join(TEST_DIR, 'project'));
+
+      expect(cfg.codeMieUrl).toBe('https://unrelated.example.com');
+      expect(cfg.codeMieProject).toBe('shared-proj');
+    });
+
+    it('does not mix identities across environments: a global profile that already owns part of its identity does not inherit the rest from the shared workspace', async () => {
+      // 'newprofile' already owns its own codeMieUrl (matching its own baseUrl's origin),
+      // but has not yet been assigned a project/integration. The shared workspace still
+      // carries a STALE project left over from a different environment/profile. Filling
+      // the missing project from it would attribute usage to the wrong project.
+      await writeGlobal('newprofile', {
+        newprofile: {
+          provider: 'ai-run-sso',
+          baseUrl: 'https://epam.example.com/code-assistant-api',
+          codeMieUrl: 'https://epam.example.com',
+          model: 'claude-sonnet-4-6',
+          name: 'newprofile'
+        }
+      });
+      const globalRaw = JSON.parse(await fs.readFile(GLOBAL_CONFIG_PATH, 'utf-8'));
+      globalRaw.workspace = {
+        codeMieUrl: 'https://epam.example.com',
+        codeMieProject: 'OTHER-TEAMS-PROJECT',
+        codeMieIntegration: { id: 'other-teams-integration' }
+      };
+      await fs.writeFile(GLOBAL_CONFIG_PATH, JSON.stringify(globalRaw, null, 2));
+
+      const cfg = await ConfigLoader.load(path.join(TEST_DIR, 'project'), { name: 'newprofile' });
+
+      expect(cfg.codeMieUrl).toBe('https://epam.example.com');
+      expect(cfg.codeMieProject).toBeUndefined();
+      expect(cfg.codeMieIntegration).toBeUndefined();
     });
 
     it('does not crash and falls back to the global workspace when the local config has an explicit "workspace": null', async () => {
