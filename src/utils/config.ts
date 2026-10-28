@@ -278,25 +278,35 @@ export class ConfigLoader {
 
   /**
    * Resolve the workspace for the profile in use. Tooling-context fields follow
-   * resolveWorkspace(). For a global profile, identity fields (codeMieUrl,
-   * codeMieProject, codeMieIntegration) normally come from the profile itself
-   * (merged in earlier by load()/loadWithSources()), not from here — but a
-   * profile that predates migration 008 (e.g. a `bin/codemie-*` launcher ran
-   * before `bin/codemie.js` ever had a chance to migrate it) has none of its
+   * resolveWorkspace(). Identity fields (codeMieUrl, codeMieProject,
+   * codeMieIntegration) normally come from the profile itself (merged in
+   * earlier by load()/loadWithSources()), not from here — but a profile that
+   * predates migration 008 (e.g. a `bin/codemie-*` launcher ran before
+   * `bin/codemie.js` ever had a chance to migrate it), or a local profile with
+   * no identity of its own and no local workspace override, has none of its
    * own yet, so this falls back to the shared workspace value. The fallback is
    * all-or-nothing per profile, not per key: if the profile already owns ANY of
    * the three fields (via its own stored data or the caller-supplied
    * profileIdentity below), none of its missing fields are filled from the
    * shared workspace — the shared object may be a leftover from a different
    * profile's environment, and gap-filling only the missing ones could pair
-   * this profile's own field with another environment's.
+   * this profile's own field with another environment's. The same
+   * canUseSharedIdentity() origin/sibling check gates the fallback for both a
+   * global profile and a same-named local one — the shared value may belong to
+   * a different environment either way.
+   *
+   * A genuine repo-specific workspace override (the local scope actually
+   * defines its own `workspace`, per resolveWorkspace()) always wins outright
+   * for a local profile, including any identity it defines — that is real
+   * local-scope data, not a leftover to gate.
    *
    * @param workingDir - Directory whose local config is considered
    * @param isLocalProfile - Whether the profile in use is defined in the local config
-   * @param profileIdentity - Identity already resolved from the global profile
-   *   itself, if any; any key present here disables the shared fallback entirely
-   * @param profileName - Name of the global profile in use, used to look up its
-   *   own `baseUrl`/`provider` and its siblings for canUseSharedIdentity(). The
+   * @param profileIdentity - Identity already resolved from the profile itself
+   *   (global or same-named local), if any; any key present here disables the
+   *   shared fallback entirely
+   * @param profileName - Name of the profile in use, used to look up its own
+   *   `baseUrl`/`provider` and its siblings for canUseSharedIdentity(). The
    *   fallback source is always the GLOBAL shared workspace (never a repo-local
    *   one from resolveWorkspace() above — a repo's own workspace is an unrelated
    *   project-context overlay with its own separate compatibility rules).
@@ -308,9 +318,6 @@ export class ConfigLoader {
     profileName?: string
   ): Promise<WorkspaceConfig> {
     const workspace = await this.resolveWorkspace(workingDir);
-    if (isLocalProfile) {
-      return workspace;
-    }
 
     const { profiles: allProfiles, workspace: globalWorkspace } = await this.loadMultiProviderConfig();
     const ownProfile = (profileName && allProfiles?.[profileName]) || {};
@@ -330,6 +337,30 @@ export class ConfigLoader {
     const ownHasAnyIdentity = this.IDENTITY_KEYS.some(
       (key) => (profileIdentity as any)[key] !== undefined || (ownProfile as any)[key] !== undefined
     );
+
+    if (isLocalProfile) {
+      const localMultiConfig = await this.loadLocalMultiProviderConfig(workingDir);
+      if (localMultiConfig.workspace != null) {
+        // A genuine repo-specific workspace override — including any identity it
+        // defines — always wins outright; this *is* the local scope's own data.
+        return workspace;
+      }
+      // No local workspace of its own: `workspace` above fell through to the global
+      // one (see resolveWorkspace()), which may carry the permanent shared-identity
+      // fallback (migration 008 never strips it). That leftover must never overwrite
+      // a same-named global profile's own, already-known identity — load() already
+      // merged the correct value in before this runs — and is gated by the same
+      // canUseSharedIdentity() origin/sibling check as the global-profile branch
+      // below, for the same reason: it may belong to a different environment.
+      if (ownHasAnyIdentity || !canUseShared) {
+        const result: Record<string, unknown> = { ...workspace };
+        for (const key of this.IDENTITY_KEYS) {
+          delete result[key];
+        }
+        return result as WorkspaceConfig;
+      }
+      return workspace;
+    }
 
     const result: Record<string, unknown> = { ...workspace };
     for (const key of this.IDENTITY_KEYS) {
@@ -773,21 +804,32 @@ export class ConfigLoader {
     (profileFields as any).name = profileName;
     // Provider-specific fields stay full-replace (switching provider drops
     // stale fields like authMethod/jwtConfig), but identity carries forward
-    // from the existing profile when the update omits it.
+    // from the existing profile when the update omits it. All-or-nothing, not
+    // per key: if the update supplies ANY identity field, it is establishing a
+    // new identity (even if only partially) — carrying forward the OTHER,
+    // unsupplied old fields next to it would pair this update's new value with
+    // an old field left over from a different environment. Only when the
+    // update supplies NONE of the three does the old trio carry forward whole —
+    // intentionally, including across a provider switch; there is no way to
+    // explicitly clear a profile's identity short of deleting/recreating it
+    // (see .ai-run/guides/usage/project-config.md's "never cleared" note).
     const existingProfile = config.profiles[profileName];
+    const suppliesAnyIdentity = this.IDENTITY_KEYS.some((key) => (profileFields as any)[key] !== undefined);
     const preservedIdentity: Partial<ProviderProfile> = {};
-    if (existingProfile) {
+    if (existingProfile && !suppliesAnyIdentity) {
       for (const key of this.IDENTITY_KEYS) {
-        if ((profileFields as any)[key] === undefined) {
-          if ((existingProfile as any)[key] !== undefined) {
-            (preservedIdentity as any)[key] = (existingProfile as any)[key];
-          }
-          // An explicit `key: undefined` (e.g. a provider's buildConfig() that
-          // always sets the key, `as string | undefined`) is still an own
-          // property and would override preservedIdentity in the spread below —
-          // drop it so "omitted" and "explicitly undefined" behave the same way.
-          delete (profileFields as any)[key];
+        if ((existingProfile as any)[key] !== undefined) {
+          (preservedIdentity as any)[key] = (existingProfile as any)[key];
         }
+      }
+    }
+    // An explicit `key: undefined` (e.g. a provider's buildConfig() that always
+    // sets the key, `as string | undefined`) is still an own property and would
+    // override preservedIdentity in the spread below — drop it either way, so
+    // "omitted" and "explicitly undefined" behave the same way.
+    for (const key of this.IDENTITY_KEYS) {
+      if ((profileFields as any)[key] === undefined) {
+        delete (profileFields as any)[key];
       }
     }
     config.profiles[profileName] = {

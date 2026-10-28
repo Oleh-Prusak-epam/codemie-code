@@ -167,6 +167,29 @@ pair this profile's own field with another environment's. Only non-identity work
 (`hooks`, `plugins`, `assistants`, `skillsSearchUrl`, `claudeAutocompactPct`, `metrics`) remain
 scope-level shared across global profiles.
 
+**Policy note — the shared fallback is a permanent, frozen snapshot, by design.** Once migration
+008 has run, `saveProfile()` no longer writes to the shared workspace's identity fields at all —
+whatever value was there at migration time (or whatever a pre-migration config last wrote to it)
+stays there forever, unchanged by later profile edits. This is intentional: it is the only way a
+local profile with no identity of its own, or a vendor-subscription/split-host global profile
+created at any point afterward, can still receive an ambient identity the way they always could
+before this fix. The trade-off is accepted, not accidental: `canUseSharedIdentity()`'s
+origin/sibling check (applied consistently to both the global-profile and the local-profile
+fallback paths) is the only guard against it leaking into the wrong environment, and that check's
+answer can change if a sibling profile is later added or removed — a profile can gain or lose the
+fallback as the sibling set changes. There is no provenance record of which profile originally
+donated the shared value, and no expiry. If a team needs a guaranteed-fresh identity, they should
+assign it directly to the profile (`saveProfile()` with the identity trio set explicitly) rather
+than relying on the shared fallback.
+
+**Policy note — a profile's saved identity is never cleared, only replaced as a whole trio.**
+`saveProfile()` treats `codeMieUrl`/`codeMieProject`/`codeMieIntegration` as a unit: if an update
+supplies *any* one of the three, none of the others carry forward from the profile's previous
+value (to avoid pairing a new field with a stale one) — but if an update supplies *none* of the
+three, the existing trio carries forward unchanged, including across a provider switch. There is
+currently no way to explicitly clear a profile's identity (e.g. back to "unset") short of deleting
+and recreating the profile; retention across edits is the intended behavior, not an oversight.
+
 ```bash
 codemie-claude                      # repo's local profile: repo's CodeMie URL and project
 codemie-claude --profile anthropic  # global profile: that profile's own CodeMie URL and project

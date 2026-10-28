@@ -494,6 +494,33 @@ describe('ConfigLoader - Project-Level Configuration', () => {
       expect(config.profiles.p1.model).toBe('claude-opus-5-5');
     });
 
+    it('saveProfile treats the identity trio as a unit: supplying a new codeMieUrl does not pair it with an old codeMieProject/codeMieIntegration left over from a different environment', async () => {
+      await ConfigLoader.saveProfile('work', {
+        provider: 'ai-run-sso',
+        codeMieUrl: 'https://old-env.example.com',
+        codeMieProject: 'old-env-proj',
+        codeMieIntegration: { id: 'old-env-integration' },
+        baseUrl: 'https://old-env.example.com/code-assistant-api',
+        model: 'claude-sonnet-4-6'
+      } as any);
+
+      // Re-saved under a NEW environment's codeMieUrl, with no project/integration
+      // supplied yet — the old ones must not be carried forward next to the new URL.
+      await ConfigLoader.saveProfile('work', {
+        provider: 'ai-run-sso',
+        codeMieUrl: 'https://new-env.example.com',
+        baseUrl: 'https://new-env.example.com/code-assistant-api',
+        model: 'claude-sonnet-4-6'
+      } as any);
+
+      const content = await fs.readFile(GLOBAL_CONFIG_PATH, 'utf-8');
+      const config: MultiProviderConfig = JSON.parse(content);
+
+      expect((config.profiles.work as any).codeMieUrl).toBe('https://new-env.example.com');
+      expect((config.profiles.work as any).codeMieProject).toBeUndefined();
+      expect((config.profiles.work as any).codeMieIntegration).toBeUndefined();
+    });
+
     it('initProjectConfig routes workspace fields into the local scope workspace, not into profiles[name]', async () => {
       const workingDir = path.join(TEST_DIR, 'project');
       await ConfigLoader.initProjectConfig(workingDir, {
@@ -823,6 +850,43 @@ describe('ConfigLoader - workspace resolution and project-only composition', () 
       expect(cfg.codeMieUrl).toBe('https://epam.example.com');
       expect(cfg.codeMieProject).toBeUndefined();
       expect(cfg.codeMieIntegration).toBeUndefined();
+    });
+
+    it('a same-named local profile with no identity of its own does not let the permanent shared workspace fallback overwrite the matching global profile\'s own identity', async () => {
+      // 'team' is a GLOBAL profile that already owns its own identity. The repo also
+      // defines a LOCAL profile named 'team' (no identity, no local workspace of its
+      // own) — a legitimate pattern for sharing provider/model defaults in a repo
+      // without duplicating CodeMie identity. The repo has no own workspace either, so
+      // resolveWorkspace() falls through to the GLOBAL workspace, which still carries a
+      // stale/leftover shared identity (migration 008 never strips it). That leftover
+      // must never clobber 'team' global profile's own, already-correct identity.
+      await writeGlobal('team', {
+        team: {
+          provider: 'ai-run-sso',
+          baseUrl: 'https://team.example.com/code-assistant-api',
+          codeMieUrl: 'https://team.example.com',
+          codeMieProject: 'team-own-proj',
+          model: 'claude-sonnet-4-6',
+          name: 'team'
+        }
+      });
+      const globalRaw = JSON.parse(await fs.readFile(GLOBAL_CONFIG_PATH, 'utf-8'));
+      globalRaw.workspace = { codeMieUrl: 'https://stale-leftover.example.com', codeMieProject: 'stale-leftover-proj' };
+      await fs.writeFile(GLOBAL_CONFIG_PATH, JSON.stringify(globalRaw, null, 2));
+
+      await writeLocal('team', {
+        team: {
+          provider: 'ai-run-sso',
+          baseUrl: 'https://team.example.com/code-assistant-api',
+          model: 'claude-sonnet-4-6',
+          name: 'team'
+        }
+      });
+
+      const cfg = await ConfigLoader.load(path.join(TEST_DIR, 'project'));
+
+      expect(cfg.codeMieUrl).toBe('https://team.example.com');
+      expect(cfg.codeMieProject).toBe('team-own-proj');
     });
 
     it('does not crash and falls back to the global workspace when the local config has an explicit "workspace": null', async () => {
