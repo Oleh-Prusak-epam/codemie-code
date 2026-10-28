@@ -320,13 +320,7 @@ export class ConfigLoader {
     const workspace = await this.resolveWorkspace(workingDir);
 
     const { profiles: allProfiles, workspace: globalWorkspace } = await this.loadMultiProviderConfig();
-    const ownProfile = (profileName && allProfiles?.[profileName]) || {};
-    const canUseShared = canUseSharedIdentity(
-      ownProfile,
-      allProfiles ?? {},
-      profileName,
-      (globalWorkspace as any)?.codeMieUrl
-    );
+    const globalOwnProfile = (profileName && allProfiles?.[profileName]) || {};
 
     // All-or-nothing, not per-key: if the profile already owns ANY identity field —
     // via the caller-supplied profileIdentity (e.g. listProfiles() looks it up by
@@ -335,7 +329,7 @@ export class ConfigLoader {
     // profile's own (correct) field with a shared field left over from whichever
     // profile saved last, attributing usage to the wrong project/integration.
     const ownHasAnyIdentity = this.IDENTITY_KEYS.some(
-      (key) => (profileIdentity as any)[key] !== undefined || (ownProfile as any)[key] !== undefined
+      (key) => (profileIdentity as any)[key] !== undefined || (globalOwnProfile as any)[key] !== undefined
     );
 
     if (isLocalProfile) {
@@ -351,8 +345,20 @@ export class ConfigLoader {
       // a same-named global profile's own, already-known identity — load() already
       // merged the correct value in before this runs — and is gated by the same
       // canUseSharedIdentity() origin/sibling check as the global-profile branch
-      // below, for the same reason: it may belong to a different environment.
-      if (ownHasAnyIdentity || !canUseShared) {
+      // below, for the same reason: it may belong to a different environment. The
+      // check must use the LOCAL profile's own `provider`/`baseUrl` (not a same-named
+      // global profile's, which may not exist at all for a purely local-only
+      // profile) — using the global lookup here would pass an empty stand-in for a
+      // local-only profile, making canUseSharedIdentity() a no-op for that whole
+      // class of profiles.
+      const localOwnProfile = (profileName && localMultiConfig.profiles?.[profileName]) || {};
+      const canUseSharedForLocal = canUseSharedIdentity(
+        localOwnProfile,
+        allProfiles ?? {},
+        profileName,
+        (globalWorkspace as any)?.codeMieUrl
+      );
+      if (ownHasAnyIdentity || !canUseSharedForLocal) {
         const result: Record<string, unknown> = { ...workspace };
         for (const key of this.IDENTITY_KEYS) {
           delete result[key];
@@ -362,6 +368,12 @@ export class ConfigLoader {
       return workspace;
     }
 
+    const canUseShared = canUseSharedIdentity(
+      globalOwnProfile,
+      allProfiles ?? {},
+      profileName,
+      (globalWorkspace as any)?.codeMieUrl
+    );
     const result: Record<string, unknown> = { ...workspace };
     for (const key of this.IDENTITY_KEYS) {
       delete result[key];

@@ -339,10 +339,11 @@ describe('resolveBudget', () => {
   });
 
   it('falls back to the shared workspace.codeMieUrl when the active profile predates migration 008', async () => {
-    // Migration 008 always strips codeMieUrl from workspace once it runs, so a non-empty
-    // workspace.codeMieUrl here only ever means the profile hasn't been migrated yet
-    // (e.g. a `codemie-claude` launch before `bin/codemie.js` ever ran migrations) —
-    // not a stale leftover. The profile's own value still wins when present.
+    // Migration 008 never strips codeMieUrl from workspace (it's a permanent ambient
+    // fallback), so a non-empty workspace.codeMieUrl here can mean either an
+    // unmigrated profile or the historical leftover — either way, a profile with none
+    // of its own identity yet is allowed to inherit it. The profile's own value still
+    // wins when present.
     const readFile = readFileFor({
       activeProfile: 'default',
       userEmail: 'me@x.com',
@@ -394,6 +395,26 @@ describe('resolveBudget', () => {
       },
     });
     const result = await resolveBudget({ readFile, writeFile: vi.fn(), fetchImpl: vi.fn(), getAuthHeadersImpl: vi.fn() });
+    expect(result).toEqual({ budget: null, budgetError: null });
+  });
+
+  it('does not fall back to the shared workspace.codeMieUrl when the profile already owns a different identity field (atomic trio, not just codeMieUrl)', async () => {
+    // 'default' already owns its own codeMieProject but has no codeMieUrl yet. Even
+    // though canUseSharedIdentity() would otherwise allow the shared codeMieUrl (same
+    // origin as baseUrl, no conflicting sibling), the atomic-trio rule must still
+    // refuse it — mixing this profile's own project with a shared/leftover URL from a
+    // possibly different environment is exactly what the trio-as-a-unit rule in
+    // config.ts prevents everywhere else.
+    const readFile = readFileFor({
+      activeProfile: 'default',
+      userEmail: 'me@x.com',
+      workspace: { codeMieUrl: 'https://shared.example.com' },
+      profiles: {
+        default: { provider: 'ai-run-sso', baseUrl: 'https://shared.example.com/api', codeMieProject: 'own-proj' },
+      },
+    });
+    const result = await resolveBudget({ readFile, writeFile: vi.fn(), fetchImpl: vi.fn(), getAuthHeadersImpl: vi.fn() });
+    // codeMieUrl never resolved (own identity blocks the fallback) -> early skip, not reauthenticate.
     expect(result).toEqual({ budget: null, budgetError: null });
   });
 

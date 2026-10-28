@@ -770,7 +770,11 @@ export async function resolveBudget({
   // not just pre-migration. Guarded by canUseSharedIdentity(), same as the migration
   // and the read-time fallback in src/utils/config.ts.
   let codeMieUrl = profile?.codeMieUrl;
-  if (!codeMieUrl && config.workspace?.codeMieUrl
+  // Atomic trio, not just codeMieUrl: a profile that already owns ANY of its own
+  // identity fields (e.g. codeMieProject from a partial write) must not receive the
+  // shared codeMieUrl either — mirrors config.ts's ownHasAnyIdentity gate exactly.
+  const ownHasAnyIdentity = Boolean(codeMieUrl || profile?.codeMieProject || profile?.codeMieIntegration);
+  if (!ownHasAnyIdentity && config.workspace?.codeMieUrl
     && canUseSharedIdentity(profile, config.profiles, profileName, config.workspace.codeMieUrl)) {
     codeMieUrl = config.workspace.codeMieUrl;
   }

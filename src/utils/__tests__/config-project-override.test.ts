@@ -823,6 +823,44 @@ describe('ConfigLoader - workspace resolution and project-only composition', () 
       expect(cfg.codeMieProject).toBe('shared-proj');
     });
 
+    it('refuses the shared-workspace fallback for a purely local-only profile when a sibling GLOBAL profile provably owns that shared origin (canUseSharedIdentity must see the LOCAL profile\'s own baseUrl, not an empty stand-in)', async () => {
+      // 'env-b' is a global profile that legitimately claims the shared origin:
+      // its own baseUrl IS on that origin. The shared workspace is the permanent,
+      // never-stripped leftover identity for that same origin.
+      await writeGlobal('env-b', {
+        'env-b': {
+          provider: 'ai-run-sso',
+          baseUrl: 'https://b.example.com/code-assistant-api',
+          codeMieUrl: 'https://b.example.com',
+          model: 'claude-sonnet-4-6',
+          name: 'env-b'
+        }
+      });
+      const globalRaw = JSON.parse(await fs.readFile(GLOBAL_CONFIG_PATH, 'utf-8'));
+      globalRaw.workspace = { codeMieUrl: 'https://b.example.com', codeMieProject: 'env-b-proj' };
+      await fs.writeFile(GLOBAL_CONFIG_PATH, JSON.stringify(globalRaw, null, 2));
+
+      // 'team-local' is a PURELY LOCAL-ONLY profile (no same-named global profile
+      // exists at all) whose own baseUrl is on a DIFFERENT CodeMie environment.
+      await writeLocal('team-local', {
+        'team-local': {
+          provider: 'ai-run-sso',
+          baseUrl: 'https://a.example.com/code-assistant-api',
+          model: 'claude-sonnet-4-6',
+          name: 'team-local'
+        }
+      });
+
+      const cfg = await ConfigLoader.load(path.join(TEST_DIR, 'project'));
+
+      // Must NOT inherit env-b's codeMieUrl: canUseSharedIdentity() must be evaluated
+      // against team-local's own provider/baseUrl (ai-run-sso, a.example.com), not an
+      // empty stand-in from a nonexistent same-named global profile — env-b's sibling
+      // claim on b.example.com must refuse the fallback for team-local.
+      expect(cfg.codeMieUrl).toBeUndefined();
+      expect(cfg.codeMieProject).toBeUndefined();
+    });
+
     it('does not mix identities across environments: a global profile that already owns part of its identity does not inherit the rest from the shared workspace', async () => {
       // 'newprofile' already owns its own codeMieUrl (matching its own baseUrl's origin),
       // but has not yet been assigned a project/integration. The shared workspace still
